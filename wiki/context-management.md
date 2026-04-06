@@ -9,7 +9,7 @@ relations:
     type: feeds
   - target: "[[memory-system]]"
     type: uses
-sources: []
+sources: [claude-code]
 ---
 
 ## 一句话定义
@@ -24,13 +24,17 @@ sources: []
 
 ## 各家对比
 
-| 维度 | （待填充） |
-|------|-----------|
+| 维度 | Claude Code |
+|------|------------|
+| 核心设计 | 主动调度器而非被动救火：持续监控 token 使用、提前保留 headroom、阈值触发时执行压缩，输出可继续推理和工具调用的完整对话快照（context projection） |
+| 关键特点 | `getEffectiveContextWindowSize()` 提前扣除输出预留空间；连续失败熔断机制（`MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES`）；模式感知——session_memory 模式下主动抑制自动压缩 |
+| 局限 | 压缩质量依赖 LLM 能力；熔断后无降级策略（无截断最旧消息等回退手段）；触发阈值为静态配置不可动态调整 |
 
 ## 设计权衡
 
-（待填充）
+- **救火式压缩 vs 主动 headroom 预留**：Claude Code 选择了主动调度——在窗口被吃满之前就介入，因为被动压缩（超限才触发）会造成输出无空间的死锁，而预留 headroom 能确保模型始终有输出能力。
+- **自由文本摘要 vs 结构化状态快照**：压缩输出是符合对话协议的"状态快照"而非自由文本，因为 agent 必须能从压缩后继续工具调用和多步推理，不允许出现"失忆断层"。
 
 ## L2 详情
 
-（待导入）
+- [[context-management--claude-code]]

@@ -9,7 +9,7 @@ relations:
     type: extends
   - target: "[[hooks]]"
     type: alternative
-sources: []
+sources: [claude-code]
 ---
 
 ## 一句话定义
@@ -25,13 +25,17 @@ sources: []
 
 ## 各家对比
 
-| 维度 | （待填充） |
-|------|-----------|
+| 维度 | Claude Code |
+|------|------------|
+| 核心设计 | 按抽象层次拆成三种形态：MCP（协议接入层）、Skills（工作流模板层）、Plugins（生态封装层），三者分工明确互不混淆，MCP 解决"接什么工具"，Skills 解决"怎么做任务"，Plugins 解决"如何打包分发" |
+| 关键特点 | MCP 工具包装为标准 Tool 接口，进入同一套权限/hook/transcript 流程；Skills 支持参数化（`arguments` + `substituteArguments`）和模型覆盖；子 agent 可声明专属 MCP server 集合实现工具级隔离 |
+| 局限 | MCP server 崩溃后无自动重连；Skills 和 Commands 同名按优先级静默覆盖，缺乏冲突检测；Plugin marketplace 是中心化信任模型 |
 
 ## 设计权衡
 
-（待填充）
+- **三层分离 vs 单一插件机制**：Claude Code 选择了三层分离（MCP/Skills/Plugins 各有单一职责），避免了"万物皆插件"的混乱，但代价是理解成本高，开发者需要判断自己的扩展属于哪一层。
+- **子 Agent 专属 MCP vs 全局共享工具池**：允许子 agent 声明独立 MCP server 集合，实现了工具级隔离——不同 agent 可以连接不同工具集，但增加了连接管理的复杂度。
 
 ## L2 详情
 
-（待导入）
+- [[mcp-skills--claude-code]]

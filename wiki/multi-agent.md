@@ -9,7 +9,7 @@ relations:
     type: uses
   - target: "[[runtime-state]]"
     type: uses
-sources: []
+sources: [claude-code]
 ---
 
 ## 一句话定义
@@ -25,13 +25,17 @@ sources: []
 
 ## 各家对比
 
-| 维度 | （待填充） |
-|------|-----------|
+| 维度 | Claude Code |
+|------|------------|
+| 核心设计 | 建立在正式任务系统之上的 agent orchestration runtime：每个子 agent 拥有独立执行环境、专属 MCP servers 和独立 transcript，通过 `AgentTool` 作为统一标准化入口被调度 |
+| 关键特点 | 任务系统先于多智能体（子 agent 结果包装为持久化 task）；拓扑弹性（同进程/tmux 多进程/远程 backend 透明切换）；Coordinator 作为一等公民（专用 system prompt + 工具集约束） |
+| 局限 | Coordinator 模式目前是单机的，缺乏真正的分布式协调；agent 间通过 mailbox（异步写文件）通信，延迟较高 |
 
 ## 设计权衡
 
-（待填充）
+- **任务化 vs 临时子会话**：Claude Code 选择了任务化——子 agent 结果包装为 task，而非临时子会话，使得 async agent、状态恢复和结果查询成为可能，是架构成熟度的标志。
+- **执行环境隔离 vs 状态共享**：子 agent 默认拥有独立的 MCP 连接、独立 transcript 和独立 abort controller，防止跨 agent 状态污染——隔离是默认行为，共享是显式选择。
 
 ## L2 详情
 
-（待导入）
+- [[multi-agent--claude-code]]
