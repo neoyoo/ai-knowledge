@@ -11,7 +11,7 @@ relations:
     type: uses
   - target: "[[context-management]]"
     type: uses
-sources: [claude-code]
+sources: [claude-code, openharness]
 ---
 
 ## 一句话定义
@@ -26,11 +26,11 @@ Agent 的主循环 — 发请求给模型、拿结果、判断下一步（继续
 
 ## 各家对比
 
-| 维度 | Claude Code |
-|------|------------|
-| 核心设计 | `query.ts` + `QueryEngine.ts` 双核分工：单回合执行器（状态机）+ 会话级控制器，将 agent turn 显式建模为可观测、可中断、可恢复的状态机 |
-| 关键特点 | max_output_tokens 命中后自动降级重试（不直接失败）；工具结果写入前做 budget 控制（`applyToolResultBudget`）；REPL 与 SDK headless 模式共享同一 runtime |
-| 局限 | 状态转换逻辑散落函数体中，无形式化状态转换图；固定 turnCount 上限不自适应任务复杂度 |
+| 维度 | Claude Code | OpenHarness |
+|------|------------|-------------|
+| 核心设计 | `query.ts` + `QueryEngine.ts` 双核分工：单回合执行器（状态机）+ 会话级控制器，将 agent turn 显式建模为可观测、可中断、可恢复的状态机 | `run_query()` 为核心，实现为最多 8 轮（可配置）的 `for` 循环：流式接收响应，有工具调用则执行（多工具通过 `asyncio.gather()` 并行），无工具调用则直接返回 |
+| 关键特点 | max_output_tokens 命中后自动降级重试（不直接失败）；工具结果写入前做 budget 控制（`applyToolResultBudget`）；REPL 与 SDK headless 模式共享同一 runtime | 单/多工具执行路径显式分支，代码意图一目了然；`asyncio.gather()` 并行执行多工具是 first-class 设计；`CostTracker` 内嵌于 `QueryEngine`，费用追踪随对话历史自然流动 |
+| 局限 | 状态转换逻辑散落函数体中，无形式化状态转换图；固定 turnCount 上限不自适应任务复杂度 | 超过 `max_turns` 直接抛出 `RuntimeError`，无优雅降级；对话历史不做压缩，长对话可能撑爆 context window |
 
 ## 设计权衡
 
@@ -40,3 +40,4 @@ Agent 的主循环 — 发请求给模型、拿结果、判断下一步（继续
 ## L2 详情
 
 - [[query-loop--claude-code]]
+- [[query-loop--openharness]]

@@ -9,7 +9,7 @@ relations:
     type: feeds
   - target: "[[memory-system]]"
     type: uses
-sources: [claude-code]
+sources: [claude-code, openharness]
 ---
 
 ## 一句话定义
@@ -24,11 +24,11 @@ sources: [claude-code]
 
 ## 各家对比
 
-| 维度 | Claude Code |
-|------|------------|
-| 核心设计 | 主动调度器而非被动救火：持续监控 token 使用、提前保留 headroom、阈值触发时执行压缩，输出可继续推理和工具调用的完整对话快照（context projection） |
-| 关键特点 | `getEffectiveContextWindowSize()` 提前扣除输出预留空间；连续失败熔断机制（`MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES`）；模式感知——session_memory 模式下主动抑制自动压缩 |
-| 局限 | 压缩质量依赖 LLM 能力；熔断后无降级策略（无截断最旧消息等回退手段）；触发阈值为静态配置不可动态调整 |
+| 维度 | Claude Code | OpenHarness |
+|------|------------|-------------|
+| 核心设计 | 主动调度器而非被动救火：持续监控 token 使用、提前保留 headroom、阈值触发时执行压缩，输出可继续推理和工具调用的完整对话快照（context projection） | 极简设计：token 估算用字符数/4 的启发式公式，压缩逻辑仅 58 行，通过滑动窗口保留最近 N 条消息、将旧消息替换为单条拼接文本摘要；无自动触发，无调用模型生成摘要 |
+| 关键特点 | `getEffectiveContextWindowSize()` 提前扣除输出预留空间；连续失败熔断机制（`MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES`）；模式感知——session_memory 模式下主动抑制自动压缩 | 整个压缩子系统 58 行完成，零外部依赖（无 tiktoken、无异步初始化）；成本追踪与压缩逻辑完全解耦；字符数估算足以支撑粗粒度判断，避免过度工程化 |
+| 局限 | 压缩质量依赖 LLM 能力；熔断后无降级策略（无截断最旧消息等回退手段）；触发阈值为静态配置不可动态调整 | 字符数/4 对中文、代码误差可达 2-5 倍；压缩不自动触发，需 agent loop 手动检测阈值；`compact_messages()` 只做文本拼接而非语义摘要，旧上下文可读性差 |
 
 ## 设计权衡
 
@@ -38,3 +38,4 @@ sources: [claude-code]
 ## L2 详情
 
 - [[context-management--claude-code]]
+- [[context-management--openharness]]
