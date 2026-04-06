@@ -1,0 +1,82 @@
+# AI Engineering Knowledge Base
+
+## 项目定位
+
+全域 AI 工程知识库 -- 受 Karpathy LLM Wiki 启发，覆盖整套 AI 工程领域的结构化知识系统。
+
+**核心理念**: 知识是一张网不是抽屉。跨域连接才是价值所在。
+
+## 知识覆盖范围
+
+| 领域 | 包含内容 |
+|-----|--------|
+| Agent Orchestration | Loop、状态机、决策策略 |
+| Prompt Engineering | 技巧、框架、评估方法 |
+| Model Training & Tuning | 微调、量化、DPO |
+| Tool Ecosystem | 工具调度、生态设计、MCP、扩展 |
+| Infrastructure | 推理优化、框架、部署 |
+| Evaluation | 基准、评估框架、指标 |
+| Context & Memory | 长对话、压缩、检索增强 |
+
+## 架构
+
+### 三层结构
+1. **Raw Sources** -- 不可变的原始材料（源码、文章、论文）
+2. **Wiki** -- 结构化 Obsidian markdown 页面库（按概念维度组织）
+3. **Schema** -- 配置控制层（知识分类、引用规则、页面模板）
+
+### 概念维度（页面组织方式）
+按架构概念而非来源组织：Agent Loop / Tool System / Context & Memory / Multi-Agent / Prompt Architecture / Extension Model / Reliability / Channel & Interface
+
+### 三个核心操作
+- **ingest** -- 原始源 → 提取架构洞察 → 映射概念维度 → 更新概念页 → 标注关系
+- **query** -- 综合查询，汇聚各家设计对比，给出决策建议
+- **lint** -- 周期性质量维护（断链、孤立、矛盾、过期、去重）
+
+### 核心设计原则
+- **Deterministic Executor** -- LLM 只输出结构化意图（KEEP/UPDATE/MERGE/SUPERSEDE/ARCHIVE），由 executor 确定性执行，杜绝幻觉污染
+- **8-pass Linter** -- 断链/孤立/矛盾/过期/向量补边/TODO/去重/元数据校验
+- **类型化关系** -- supports/contradicts/evolved_into/depends_on 等语义关系
+- **增量去重** -- 新概念入库前向量搜索，>0.85 相似度自动去重或合并
+
+## 落地形态
+
+- **前端**: Obsidian vault（markdown、wikilinks、反向链接、Graph View）
+- **后端**: Ingest 管道（源码/文章 → 提取+结构化+关联 → Obsidian markdown）
+- **版本控制**: git
+
+## 上下游关系
+
+```
+AI 工程知识库 (概念维度、架构对比、设计权衡)
+  ↓ (upgrade 提案)
+create-agent-skill (skill 模块、工程实现)
+  ↓ (使用)
+用户的 agent 项目
+```
+
+## 工作准则
+
+- **质量优先**: 可以慢不能乱，生产级标准
+- **深度源码分析**: 知识来源必须是源码级深度分析，不是看 README/博客
+- **蒸馏设计**: 提取设计本质，不照搬代码
+- **跨域关联**: 每条知识都要考虑与其他领域的连接
+- **溯源追踪**: 每条知识标注来源、版本、置信度
+
+## 工作分工
+
+| 角色 | 职责 |
+|-----|------|
+| Neo | 选方向、挑源、问问题、做决策 |
+| Claude | 深挖分析、结构化知识、维护一致性、确保跨域关联 |
+| Subagent | 执行具体工作（源码分析、文件写入、搜索等） |
+
+## 页面 Schema 规范（待细化）
+
+每个概念页应包含:
+- **frontmatter** -- 标题、类别、标签、来源列表、最后更新时间
+- **概述** -- 一句话定义 + 在 AI 工程中的位置
+- **各家设计对比** -- 不同项目/论文对同一概念的实现方式
+- **设计权衡** -- 适用场景、优劣分析
+- **关系** -- 与其他概念页的类型化链接
+- **来源** -- 所有引用的原始来源及版本
