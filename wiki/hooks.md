@@ -31,8 +31,35 @@ sources: [claude-code, openharness]
 
 ## 设计权衡
 
-- **强类型协议 vs 自由文本 callback**：hook 响应通过 Zod schema 严格验证，compile-time 断言保证 SDK 类型与 schema 同步，把协议一致性保障前移到编译期而非依赖运行时检查。
-- **Hook allow 不能绕过 settings deny**：权限批准的最终决策权在 settings.json 规则，hook 只能简化用户交互（跳过弹窗），不能提升权限——安全底线由配置而非扩展点控制。
+### 方案对比
+
+| 方案 | 核心思路 | 适合场景 | 代表项目 |
+|------|---------|---------|---------|
+| 无 Hook（硬编码） | 扩展点写死在代码里，无运行时配置 | 内部工具、行为固定、团队自己维护代码 | 简单脚本 agent |
+| Shell Hook（命令行） | 事件触发时执行 shell 命令，用 JSON 做双向通信 | 开发者平台、CI/CD 集成、用户自定义自动化 | Claude Code |
+| 函数 Hook（代码回调） | 注册语言原生函数作为事件处理器 | SDK/框架、高性能场景、需要类型安全的库 | LangChain callbacks |
+| LLM 评估 Hook | Hook 条件是一个 LLM prompt，自然语言描述策略 | 语义级策略执行、难以用代码表达的模糊规则 | OpenHarness prompt/agent hook |
+
+### 场景决策指南
+
+**如果是内部工具、行为完全固定 → 无 Hook**
+扩展点是有成本的——每个 hook 都是一个间接层，一个潜在的故障点。如果行为不需要被外部定制，直接写死在代码里最简单可靠。
+
+**如果是开发者平台、需要用户可自定义行为 → Shell Hook**
+Shell 命令是最通用的接口：任意语言都能接入，行为对用户透明（shell 命令可读），和现有工具链（git hooks、CI 脚本）天然兼容。Claude Code 的 28+ 事件类型 + JSON 双向通信是这个方向的完整实现。
+
+**如果是 SDK/框架，需要高性能和类型安全 → 函数 Hook**
+没有进程 fork 开销，类型系统在编译期捕获错误。代价是语言锁定——Python SDK 的 hook 只能用 Python 写。
+
+**如果需要执行难以用代码表达的模糊安全策略 → LLM 评估 Hook**
+典型场景："这个文件操作是否涉及敏感数据？"。OpenHarness 的 `prompt`/`agent` hook 类型允许用自然语言描述策略，处理代码写不清楚的边界情况。只在真正需要语义判断时使用——每次 hook 触发都是一次 API 调用。
+
+### 常见陷阱
+
+- **Hook 太多，每个 tool call 都触发**：每个 shell hook 都是一次进程 fork，串行执行时延迟叠加。在热路径（频繁触发的 tool call）上的 hook 必须做性能测试，考虑异步模式。
+- **Hook 能修改请求和响应**：可写 hook 让系统行为变得不可预测——同样的输入可能产生不同输出，因为某个 hook 悄悄改了内容。调试时永远不知道是 agent 的问题还是 hook 改了数据。除非有充分理由，hook 应该只读。
+- **Shell hook 没有超时设置**：一个卡住的网络请求或死锁的脚本会阻塞整个 agent 主循环。所有 shell hook 必须设置超时，且超时行为需要明确定义（是 fail-open 还是 fail-closed）。
+- **安全 hook 能被其他 hook 绕过**：如果 hook 执行顺序不确定，一个 allow hook 可能在 deny hook 之前执行并缓存结果。Claude Code 的解法是 settings.json deny 规则具有最终否决权，hook 不能提升权限——安全底线必须在 hook 体系之外。
 
 ## L2 详情
 

@@ -32,8 +32,36 @@ sources: [claude-code, openharness]
 
 ## 设计权衡
 
-- **Channel = MCP 子协议 vs 独立插件体系**：Claude Code 选择了在 MCP 协议上构建 Channel，复用连接管理、auth、transport 和 plugin 体系，没有单独发明 IM/手机插件 runtime——工程复用度极高，但功能边界受限于 MCP 能力范围。
-- **RemoteAgentTask 折叠 vs 远程专用编排路径**：把远程 session 包装成本地 task，与多智能体系统共享同一编排抽象，使 `--resume` 等本地能力自然适用于远程 agent——统一视图的代价是需要维护本地-远程状态映射层。
+### 方案对比
+
+| 方案 | 核心机制 | 接入灵活性 | 实现复杂度 | 典型场景 |
+|------|---------|-----------|-----------|---------|
+| 单渠道（CLI only） | 一个入口，一套逻辑 | 低 | 极低 | 开发者工具、个人助手 |
+| 多渠道适配器（Channel Adapters） | 统一 core engine，多个 interface adapter | 中（受限于最弱渠道的能力） | 中（每个 adapter 独立维护） | 团队内部工具、多场景产品 |
+| Headless API + 独立前端 | Agent 暴露纯 REST/WebSocket API，前端独立构建 | 高（前端任意技术栈） | 高（API 设计、认证、限流） | 平台产品、第三方集成 |
+| 混合架构（Backend + Detachable TUI） | Python 后端 + Node.js React TUI 通过 stdio JSON 协议通信（OpenHarness 方案） | 中（TUI 可替换，但协议耦合） | 中高（两个 runtime + 协议维护） | 需要精美终端 UI 的开发工具 |
+
+### 场景决策指南
+
+**个人 CLI 工具 / 开发者自用** → 单渠道。多渠道是过度设计。一个入口，最快上线，最少维护。
+
+**团队内部工具（Slack + Web 并存）** → 多渠道适配器。关键是先把 core engine 设计好，adapter 层只负责格式转换和事件映射，不含业务逻辑。注意：功能集要取所有渠道的交集，Slack 特有的 interactive buttons 在 Web 端可能无等价物，反之亦然。
+
+**面向开发者的 API 产品** → Headless API。前端独立演化，第三方可以自由集成。代价是 API 设计必须足够稳定：一旦对外发布，破坏性变更成本极高。先把 API 设计对，再上 SDK。
+
+**需要精美终端 UI 的开发工具** → 混合架构（参考 OpenHarness）。Python 做 agent 逻辑（生态丰富），Node.js/React/Ink 做 TUI（UI 组件丰富）。stdio JSON 协议解耦两端，TUI 甚至可以换成 Web UI 而不动后端。前提：两个进程的生命周期管理和重连逻辑必须写稳。
+
+**需要跨设备、跨 CLI 重启继续工作**（Claude Code Remote Session 场景）→ 考虑把远程 session 折叠为本地 task（`RemoteAgentTask` 模式），使 `--resume` 等本地能力自然适用，而不是为远程单独建一套编排路径。
+
+### 常见陷阱
+
+**多渠道没有统一权限模型**：CLI 有沙箱和工具确认机制，Slack 适配器如果直接透传命令，等于从 IM 绕过了安全层。解法：权限检查必须在 core engine 层做，不能依赖各 adapter 自己实现。Claude Code 的权限 relay 走结构化 typed notification 而非文本 regex，就是为了防止自然语言消息误触发高权限操作。
+
+**API 没有 rate limiting，被滥用或意外超额**：Headless API 对外暴露后，没有限流等于裸奔。高并发下 LLM API 费用会在分钟级爆表。最低要求：按 API key 限制 RPM 和 TPM，超额返回 429。
+
+**适配器层太薄，渠道特有能力被浪费**：多渠道适配器取交集意味着放弃了各渠道的差异化能力——Slack 的 Block Kit、Web 的富文本、CLI 的流式输出各有独特价值。如果产品中某个渠道是主渠道，可以为该渠道做「增强适配器」，在通用接口之上支持渠道原生能力，而不是强制所有渠道降级到最低公分母。
+
+**stdio 协议在子进程异常退出时缺乏重连**：OpenHarness 的混合架构依赖 stdio JSON 通信，若 TUI 进程意外崩溃，后端 `BridgeSessionManager` 没有主动重连逻辑，会导致会话静默丢失。解法：后端监听子进程 `exit` 事件，自动重启或向用户暴露错误，而不是静默挂起。
 
 ## L2 详情
 
