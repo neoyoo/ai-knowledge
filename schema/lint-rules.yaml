@@ -1,0 +1,53 @@
+# AI Knowledge Base — Lint Rules
+# Used by future linter (Phase B+) to validate wiki quality.
+
+version: "1.0"
+updated: "2026-04-06"
+
+rules:
+  # Pass 1: Broken links
+  broken-links:
+    description: 所有 [[wikilink]] 必须指向存在的页面
+    severity: error
+
+  # Pass 2: Orphaned pages
+  orphaned-pages:
+    description: 每个 L2 页面必须被至少一个 L1 页面引用
+    severity: warning
+
+  # Pass 3: Missing parent
+  missing-parent:
+    description: 每个 L2 的 frontmatter.parent 必须指向存在的 L1
+    severity: error
+
+  # Pass 4: Frontmatter completeness
+  frontmatter-required:
+    L1:
+      required: [title, category, created, updated, relations, sources]
+    L2:
+      required: [title, category, parent, source, source_version, confidence, created, updated]
+    severity: warning
+
+  # Pass 5: Relation type validation
+  relation-types:
+    description: relations[].type 必须是 ontology.yaml 中定义的 6 种之一
+    valid: [uses, feeds, contradicts, evolved-into, alternative, extends]
+    severity: error
+
+  # Pass 6: Naming convention
+  naming:
+    L1: "^[a-z][a-z0-9-]*\\.md$"
+    L2: "^[a-z][a-z0-9-]*--[a-z][a-z0-9-]*\\.md$"
+    severity: error
+
+  # Pass 7: Stale content
+  stale-content:
+    description: updated 超过 180 天的页面标记为需要 review
+    threshold_days: 180
+    severity: info
+
+  # Pass 8: Duplicate detection
+  duplicate-detection:
+    description: 新概念入库前向量搜索，>0.85 相似度提示可能重复
+    similarity_threshold: 0.85
+    severity: warning
