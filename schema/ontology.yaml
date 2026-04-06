@@ -1,0 +1,107 @@
+# AI Knowledge Base — Ontology Definition
+# This file is the source of truth for concepts and relation types.
+
+version: "1.0"
+updated: "2026-04-06"
+
+# --- L1 Concepts ---
+concepts:
+  - id: prompt-system
+    title: Prompt System
+    aliases: [prompt 系统, prompt composition, dynamic prompting]
+    definition: 动态组装发给模型的 prompt
+
+  - id: query-loop
+    title: Query Loop
+    aliases: [agent loop, 主循环, agentic loop]
+    definition: Agent 主循环 — 发请求、拿结果、判断下一步
+
+  - id: tool-system
+    title: Tool System
+    aliases: [工具系统, tool dispatch, function calling, tool use]
+    definition: 发现、选择、调用、管理外部工具
+
+  - id: context-management
+    title: Context Management
+    aliases: [上下文管理, context window, token budgeting]
+    definition: 管理有限的 context window
+
+  - id: memory-system
+    title: Memory System
+    aliases: [记忆系统, persistent memory, cross-session memory]
+    definition: 跨会话的持久记忆
+
+  - id: runtime-state
+    title: Runtime State
+    aliases: [运行时状态, state management, agent state]
+    definition: 运行时状态容器与生命周期
+
+  - id: multi-agent
+    title: Multi-Agent
+    aliases: [多智能体, multi-agent orchestration, task delegation]
+    definition: 多 agent 协作 — 拆任务、分发、汇总
+
+  - id: hooks
+    title: Hooks
+    aliases: [钩子, event hooks, lifecycle hooks]
+    definition: 事件驱动的扩展点
+
+  - id: mcp-skills
+    title: MCP & Skills
+    aliases: [MCP, skills, 扩展协议, extension protocol]
+    definition: 外部扩展协议 + 可复用能力包
+
+  - id: session-recovery
+    title: Session Recovery
+    aliases: [会话恢复, checkpoint, fault tolerance]
+    definition: 断点恢复与容错
+
+  - id: channel-remote
+    title: Channel & Remote
+    aliases: [渠道, remote execution, multi-channel]
+    definition: 多渠道接入与远程执行
+
+  - id: evaluation-observability
+    title: Evaluation & Observability
+    aliases: [评估, observability, metrics, tracing]
+    definition: 效果评估 + 运行可观测
+
+# --- Relation Types ---
+relations:
+  - id: uses
+    label: A 用了 B
+    description: 运行时调用
+    example: Query Loop → Tool System
+
+  - id: feeds
+    label: A 给 B 提供数据
+    description: 数据流向
+    example: Memory → Context Management
+
+  - id: contradicts
+    label: A 和 B 思路相反
+    description: 理念冲突
+    example: 长 context vs RAG
+
+  - id: evolved-into
+    label: A 变成了 B
+    description: 技术演化
+    example: Function Calling → Tool Use
+
+  - id: alternative
+    label: A 和 B 是替代方案
+    description: 同一问题不同解法
+    example: ReAct vs Plan-and-Execute
+
+  - id: extends
+    label: A 给 B 加了新能力
+    description: 扩展
+    example: MCP 扩展 Tool System
+
+# --- Extension Rules ---
+extension:
+  conditions:
+    - 至少 3 个不同项目/来源对该概念有独立实现
+    - 不能被已有 L1 概念覆盖（否则归为 L2）
+    - 需要 Neo 和 Claude 讨论审核确认
+  exception: 设计足够优秀/创新的，可免除 3 来源要求，单源也可直接提为 L1
