@@ -86,12 +86,42 @@ Session Memory 和 autoCompact 是互补而非替代关系：
 - **多维触发保护**：`shouldExtractMemory()` 的多条件组合有效防止了对短会话、不稳定会话的过早提取，避免生成低价值记忆碎片
 - **三层知识载体明确分工**：消息历史 / 压缩快照 / Session Memory 各司其职，比"什么都塞进消息"的单层设计在长任务场景下鲁棒得多
 
+### Auto-Dream 记忆归档
+
+Claude Code 拥有所有已分析项目中唯一的**定期记忆归档机制**，位于 `src/services/autoDream/`。
+
+**触发条件**（非固定时间，条件门控）：
+- 距离上次归档 ≥ 24 小时
+- 累计 ≥ 5 个新会话 transcript
+- 在每轮结束的 stop hook 中检查
+
+**归档四阶段**：
+1. **Orient** — 扫描记忆目录结构，建立索引
+2. **Gather** — 从近期会话 transcript 收集新信号
+3. **Consolidate** — 写入/更新记忆文件
+4. **Prune** — 删除过时条目
+
+**执行机制**：
+- Forked subagent 执行，不阻塞主会话
+- `.consolidate-lock` 文件防止并发（PID + 1 小时超时）
+- 只使用只读 bash 工具（grep/find/cat），不会意外修改代码
+- UI 底部显示做梦进度
+
+**配置**：GrowthBook feature flag `tengu_onyx_plover`，可通过 `settings.json` 的 `autoDreamEnabled` 覆盖。
+
+**记忆三层架构**：
+| 层级 | 机制 | 时机 |
+|------|------|------|
+| 即时提取 | 后台 forked subagent | 每轮结束 |
+| 上下文压缩 | Message compaction | 接近 token 上限时 |
+| 定期归档 | Auto-Dream | 24h + 5 会话后 |
+
 ## 局限性
 
 - **记忆内容依赖 LLM 归纳质量**：提取 prompt 的输出质量受模型能力影响，可能遗漏重要信息或引入错误总结
 - **文件粒度固定**：一个会话对应一个 memory file，对于跨多个子任务的长会话，所有记忆混在一个文件中，缺乏结构化索引
 - **后台提取无反馈**：subagent 提取完成后，用户没有可见的通知；如果提取失败，用户无法感知，也无法手动触发补偿
-- **跨会话记忆未打通**：Session Memory 的生命周期绑定单次会话，不同会话之间的 memory file 不会自动合并或引用，长期积累会造成碎片化
+- **跨会话归档有延迟**：Auto-Dream 的触发条件（24h + 5 会话）意味着短期内创建的记忆仍然分散在各会话 memory file 中；归档后碎片化问题大幅缓解，但实时合并仍不支持
 
 ## 来源
 
