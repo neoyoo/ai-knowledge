@@ -9,7 +9,7 @@ relations:
     type: uses
   - target: "[[runtime-state]]"
     type: uses
-sources: [claude-code, openharness]
+sources: [claude-code, openharness, mirofish]
 ---
 
 ## 一句话定义
@@ -25,11 +25,11 @@ sources: [claude-code, openharness]
 
 ## 各家对比
 
-| 维度 | Claude Code | OpenHarness |
-|------|------------|-------------|
-| 核心设计 | 建立在正式任务系统之上的 agent orchestration runtime：每个子 agent 拥有独立执行环境、专属 MCP servers 和独立 transcript，通过 `AgentTool` 作为统一标准化入口被调度 | 以操作系统进程为隔离边界：每个子 agent 是独立的 `python -m openharness --headless` 子进程，以 UTF-8 文本行为通信协议；`BackgroundTaskManager` 负责进程生命周期，`SendMessageTool` 向子进程 stdin 写消息；核心逻辑约 280 行 |
-| 关键特点 | 任务系统先于多智能体（子 agent 结果包装为持久化 task）；拓扑弹性（同进程/tmux 多进程/远程 backend 透明切换）；Coordinator 作为一等公民（专用 system prompt + 工具集约束） | 零依赖隔离（子进程天然隔离，无共享内存、无锁）；极简通信协议（UTF-8 文本行，任何语言可互操作）；broken pipe 检测后自动重启子进程，提升长时任务稳定性 |
-| 局限 | Coordinator 模式目前是单机的，缺乏真正的分布式协调；agent 间通过 mailbox（异步写文件）通信，延迟较高 | `TeamRecord` 仅存于内存，进程重启后团队关系丢失；单向消息通信，子 agent 无法主动回调协调者；无结果合并机制，子 agent 产出仅写入日志文件 |
+| 维度 | Claude Code | OpenHarness | MiroFish |
+|------|------------|-------------|----------|
+| 核心设计 | 建立在正式任务系统之上的 agent orchestration runtime：每个子 agent 拥有独立执行环境、专属 MCP servers 和独立 transcript，通过 `AgentTool` 作为统一标准化入口被调度 | 以操作系统进程为隔离边界：每个子 agent 是独立的 `python -m openharness --headless` 子进程，以 UTF-8 文本行为通信协议；`BackgroundTaskManager` 负责进程生命周期，`SendMessageTool` 向子进程 stdin 写消息；核心逻辑约 280 行 | 环境介导通信——数百 agent 通过共享社交环境间接交互，行动即通信 |
+| 关键特点 | 任务系统先于多智能体（子 agent 结果包装为持久化 task）；拓扑弹性（同进程/tmux 多进程/远程 backend 透明切换）；Coordinator 作为一等公民（专用 system prompt + 工具集约束） | 零依赖隔离（子进程天然隔离，无共享内存、无锁）；极简通信协议（UTF-8 文本行，任何语言可互操作）；broken pipe 检测后自动重启子进程，提升长时任务稳定性 | 去中心化共识涌现；Zep 时序图谱做共享记忆；双平台并行模拟 |
+| 局限 | Coordinator 模式目前是单机的，缺乏真正的分布式协调；agent 间通过 mailbox（异步写文件）通信，延迟较高 | `TeamRecord` 仅存于内存，进程重启后团队关系丢失；单向消息通信，子 agent 无法主动回调协调者；无结果合并机制，子 agent 产出仅写入日志文件 | 重基础设施依赖；无法保证收敛；固定轮次终止 |
 
 ## 设计权衡
 
@@ -64,7 +64,24 @@ sources: [claude-code, openharness]
 - **子 agent 出错没有回退路径**：流水线模式下，Agent B 收到 Agent A 的错误输出后如果不做验证，错误会被当成正常输入继续传播。每个阶段需要显式的输入校验和失败处理逻辑。
 - **结果合并丢失细节**：主从派发在汇总子 agent 输出时，LLM 的摘要会丢失关键细节。需要明确设计结果合并策略，而不是让 orchestrator 随意总结。
 
+### 实践验证：共享黑板模式的四角色架构
+
+基于 MiroFish 启发 + 实际 MVP 验证，多 agent 协作讨论需要四个核心角色：
+
+| 角色 | 职责 | 时机 | 为什么不能少 |
+|------|------|------|------------|
+| **Supervisor（监管者）** | 主题锚定，偏离立即纠正 | 每次发言后 | 仅靠 prompt 约束不够，agent 会跑题 |
+| **Compressor（压缩器）** | 压缩历史，保留语义 | 上下文达 60% 阈值时 | 讨论内容增长导致 token 爆炸和注意力衰减 |
+| **Coordinator（协调者）** | 共识判断，引导焦点 | 每轮结束后 | 没有协调者讨论会发散不收敛 |
+| **Agents（讨论者）** | 实际讨论 | 轮内发言 | 核心参与者 |
+
+**关键教训（来自实测）：**
+- 主题锚定必须是实时的（每次发言后检查），不能只在轮次结束时检查——到那时已经跑偏了
+- 压缩时机应该按 token 占比触发（如 60%），不是按固定轮次——短讨论不需要压缩，长讨论可能第 2 轮就要压
+- 压缩必须保留结构化语义（共识/立场/细节/分歧/风险），不能只做简单摘要
+
 ## L2 详情
 
 - [[multi-agent--claude-code]]
 - [[multi-agent--openharness]]
+- [[multi-agent--mirofish]]
