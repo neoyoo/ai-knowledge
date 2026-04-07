@@ -9,7 +9,7 @@ relations:
     type: feeds
   - target: "[[runtime-state]]"
     type: uses
-sources: [claude-code, openharness]
+sources: [claude-code, openharness, deer-flow]
 ---
 
 ## 一句话定义
@@ -25,11 +25,11 @@ sources: [claude-code, openharness]
 
 ## 各家对比
 
-| 维度 | Claude Code | OpenHarness |
-|------|------------|-------------|
-| 核心设计 | 在上下文压缩之外引入 Session Memory File（L3 知识载体），将长期稳定信息剥离为可落盘、可审阅的 Markdown 工作笔记，由后台 subagent 异步提取，不阻塞主会话 | 忠实移植 Claude Code 记忆模式：以 `~/.openharness/data/memory/{project-name}-{sha1}/` 为存储根，`MEMORY.md` 作为索引入口，prompt 构建时注入全文并通过纯词法匹配（约 20 行）选取最相关的最多 5 个专题文件注入 |
-| 关键特点 | 多维触发保护（`shouldExtractMemory()` 综合 token 规模/增量/tool call 次数/自然停顿点）；文件即记忆（人工可读、可编辑、可版本控制）；三层知识载体明确分工（消息历史/压缩快照/Session Memory） | 词法检索完全无外部依赖，无需 embedding 模型或向量数据库；文件系统存储人类可读、可直接编辑、可用 git 版本控制；首行元数据约定（160 字符描述）将检索开销降到极低 |
-| 局限 | 记忆内容质量依赖 LLM 归纳；跨会话 memory file 不自动合并；后台提取无用户可见反馈 | 检索仅匹配标题和首行描述，正文内容对检索不可见；无后台自动提取机制，记忆写入完全依赖显式调用；无跨项目记忆共享能力 |
+| 维度 | Claude Code | OpenHarness | DeerFlow |
+|------|------------|-------------|----------|
+| 核心设计 | 在上下文压缩之外引入 Session Memory File（L3 知识载体），将长期稳定信息剥离为可落盘、可审阅的 Markdown 工作笔记，由后台 subagent 异步提取，不阻塞主会话 | 忠实移植 Claude Code 记忆模式：以 `~/.openharness/data/memory/{project-name}-{sha1}/` 为存储根，`MEMORY.md` 作为索引入口，prompt 构建时注入全文并通过纯词法匹配（约 20 行）选取最相关的最多 5 个专题文件注入 | 结构化 JSON 存储（`memory.json`）分三段：user（工作上下文）、history（近远期背景）、facts（带置信度的事实数组）；`MemoryMiddleware` 在 `after_agent` 钩子异步去抖更新；内置纠错/强化信号——检测"这不对"/"对"等词语自动调整事实置信度 |
+| 关键特点 | 多维触发保护（`shouldExtractMemory()` 综合 token 规模/增量/tool call 次数/自然停顿点）；文件即记忆（人工可读、可编辑、可版本控制）；三层知识载体明确分工（消息历史/压缩快照/Session Memory） | 词法检索完全无外部依赖，无需 embedding 模型或向量数据库；文件系统存储人类可读、可直接编辑、可用 git 版本控制；首行元数据约定（160 字符描述）将检索开销降到极低 | 纠错/强化信号隐式反馈闭环（同类项目独有）；结构化 schema + 置信度排序注入，信噪比高于扁平 markdown；去抖异步更新不阻塞主循环；tiktoken 精确 token 预算控制 |
+| 局限 | 记忆内容质量依赖 LLM 归纳；跨会话 memory file 不自动合并；后台提取无用户可见反馈 | 检索仅匹配标题和首行描述，正文内容对检索不可见；无后台自动提取机制，记忆写入完全依赖显式调用；无跨项目记忆共享能力 | 无向量检索（仅置信度排序，无语义相关性召回）；置信度排序非语境感知（高置信度事实不一定与当前对话相关）；无跨 agent 记忆共享 |
 
 ## 设计权衡
 
@@ -67,3 +67,4 @@ Markdown 保留人类可读性和可干预性，向量索引解决规模化检�
 
 - [[memory-system--claude-code]]
 - [[memory-system--openharness]]
+- [[memory-system--deer-flow]]

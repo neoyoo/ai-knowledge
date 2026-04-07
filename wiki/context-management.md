@@ -9,7 +9,7 @@ relations:
     type: feeds
   - target: "[[memory-system]]"
     type: uses
-sources: [claude-code, openharness]
+sources: [claude-code, openharness, deer-flow]
 ---
 
 ## 一句话定义
@@ -24,11 +24,11 @@ sources: [claude-code, openharness]
 
 ## 各家对比
 
-| 维度 | Claude Code | OpenHarness |
-|------|------------|-------------|
-| 核心设计 | 主动调度器而非被动救火：持续监控 token 使用、提前保留 headroom、阈值触发时执行压缩，输出可继续推理和工具调用的完整对话快照（context projection） | 极简设计：token 估算用字符数/4 的启发式公式，压缩逻辑仅 58 行，通过滑动窗口保留最近 N 条消息、将旧消息替换为单条拼接文本摘要；无自动触发，无调用模型生成摘要 |
-| 关键特点 | `getEffectiveContextWindowSize()` 提前扣除输出预留空间；连续失败熔断机制（`MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES`）；模式感知——session_memory 模式下主动抑制自动压缩 | 整个压缩子系统 58 行完成，零外部依赖（无 tiktoken、无异步初始化）；成本追踪与压缩逻辑完全解耦；字符数估算足以支撑粗粒度判断，避免过度工程化 |
-| 局限 | 压缩质量依赖 LLM 能力；熔断后无降级策略（无截断最旧消息等回退手段）；触发阈值为静态配置不可动态调整 | 字符数/4 对中文、代码误差可达 2-5 倍；压缩不自动触发，需 agent loop 手动检测阈值；`compact_messages()` 只做文本拼接而非语义摘要，旧上下文可读性差 |
+| 维度 | Claude Code | OpenHarness | DeerFlow |
+|------|------------|-------------|----------|
+| 核心设计 | 主动调度器而非被动救火：持续监控 token 使用、提前保留 headroom、阈值触发时执行压缩，输出可继续推理和工具调用的完整对话快照（context projection） | 极简设计：token 估算用字符数/4 的启发式公式，压缩逻辑仅 58 行，通过滑动窗口保留最近 N 条消息、将旧消息替换为单条拼接文本摘要；无自动触发，无调用模型生成摘要 | `SummarizationMiddleware` 实现自动压缩，触发条件三选一（token 数/消息数/占最大上下文比例），触发后保留最近 N 条消息，旧消息替换为摘要；tiktoken 精确计数；中间件在 `after_model` 钩子挂载，与对话循环完全解耦 |
+| 关键特点 | `getEffectiveContextWindowSize()` 提前扣除输出预留空间；连续失败熔断机制（`MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES`）；模式感知——session_memory 模式下主动抑制自动压缩 | 整个压缩子系统 58 行完成，零外部依赖（无 tiktoken、无异步初始化）；成本追踪与压缩逻辑完全解耦；字符数估算足以支撑粗粒度判断，避免过度工程化 | 三模式触发最灵活（token_count/message_count/fraction，覆盖不同部署场景）；摘要模型可独立配置（主模型强推理，摘要用小模型降成本）；中间件模式干净解耦，替换或关闭不影响其他组件 |
+| 局限 | 压缩质量依赖 LLM 能力；熔断后无降级策略（无截断最旧消息等回退手段）；触发阈值为静态配置不可动态调整 | 字符数/4 对中文、代码误差可达 2-5 倍；压缩不自动触发，需 agent loop 手动检测阈值；`compact_messages()` 只做文本拼接而非语义摘要，旧上下文可读性差 | 依赖 LangChain 内置实现，无法精细控制摘要提示词；无熔断机制（摘要调用失败时无降级处理）；压缩不感知语义边界，可能在工具调用链中间截断 |
 
 ## 设计权衡
 
@@ -71,3 +71,4 @@ sources: [claude-code, openharness]
 
 - [[context-management--claude-code]]
 - [[context-management--openharness]]
+- [[context-management--deer-flow]]

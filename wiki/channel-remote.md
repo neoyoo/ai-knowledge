@@ -9,7 +9,7 @@ relations:
     type: uses
   - target: "[[runtime-state]]"
     type: uses
-sources: [claude-code, openharness]
+sources: [claude-code, openharness, deer-flow]
 ---
 
 ## 一句话定义
@@ -24,11 +24,11 @@ sources: [claude-code, openharness]
 
 ## 各家对比
 
-| 维度 | Claude Code | OpenHarness |
-|------|------------|-------------|
-| 核心设计 | Channel（MCP 子协议，解决外部消息通道异步接入）+ Remote Session（把云端 agent 实例折叠回本地 task 系统统一编排），两者共同将 agent 从终端内对话循环扩展为跨设备可恢复 agent runtime | Python 后端 + React/Ink TUI 前端通过 stdio JSON 协议通信的混合架构；`BridgeSessionManager` 管理长生命周期子进程；cron 系统通过 `RemoteTriggerTool` 支持定时触发 agent 执行；当前"远程"本质上是本地子进程管理 |
-| 关键特点 | Channel 复用整套 MCP 基础设施（无需单独发明 IM 插件 runtime）；权限 relay 走结构化 typed notification 而非文本 regex（防止自然语言误触发）；`RemoteAgentTask` 把远程 session 折叠为本地 task，支持 `--resume` 跨 CLI 重启 | 混合语言架构（Python + Node.js React/Ink），stdio JSON 协议解耦，各语言专注擅长领域；cron 调度内置，JSON 存储简单可审计；`WorkSecret` 凭证编码为未来网络化扩展预留接口形态 |
-| 局限 | Channel 依赖 Claude.ai OAuth，纯 API key 用户无法使用；Remote session 要求 git repo + git remote；远程 session 只能 HTTP 轮询不能 WebSocket 推送 | 无 WebSocket 服务端，无 OAuth，无云端 channel；所谓"远程"是本地子进程管理；`WorkSecret` 机制已设计但未连接任何活跃网络端点；stdio JSON 通信在进程异常退出时缺乏健壮的重连机制 |
+| 维度 | Claude Code | OpenHarness | DeerFlow |
+|------|------------|-------------|----------|
+| 核心设计 | Channel（MCP 子协议，解决外部消息通道异步接入）+ Remote Session（把云端 agent 实例折叠回本地 task 系统统一编排），两者共同将 agent 从终端内对话循环扩展为跨设备可恢复 agent runtime | Python 后端 + React/Ink TUI 前端通过 stdio JSON 协议通信的混合架构；`BridgeSessionManager` 管理长生命周期子进程；cron 系统通过 `RemoteTriggerTool` 支持定时触发 agent 执行；当前"远程"本质上是本地子进程管理 | Nginx 反向代理统一入口（`:2026`）三服务架构（LangGraph Server + FastAPI Gateway + Next.js），内置 Slack/Telegram/Feishu/WeCom 四个 IM 平台适配器，同时提供嵌入式 Python SDK（`DeerFlowClient`）和 ACP 协议跨 harness 互调 |
+| 关键特点 | Channel 复用整套 MCP 基础设施（无需单独发明 IM 插件 runtime）；权限 relay 走结构化 typed notification 而非文本 regex（防止自然语言误触发）；`RemoteAgentTask` 把远程 session 折叠为本地 task，支持 `--resume` 跨 CLI 重启 | 混合语言架构（Python + Node.js React/Ink），stdio JSON 协议解耦，各语言专注擅长领域；cron 调度内置，JSON 存储简单可审计；`WorkSecret` 凭证编码为未来网络化扩展预留接口形态 | 最完整的 channel 覆盖（4 个 IM 平台 + Web UI + Python SDK + ACP）；嵌入式 SDK 无服务器运行（`DeerFlowClient` 零基础设施启动）；ACP 协议实现跨 harness 互操作（可作为 meta-orchestrator 调度外部 agent）；Nginx 统一入口简化运维 |
+| 局限 | Channel 依赖 Claude.ai OAuth，纯 API key 用户无法使用；Remote session 要求 git repo + git remote；远程 session 只能 HTTP 轮询不能 WebSocket 推送 | 无 WebSocket 服务端，无 OAuth，无云端 channel；所谓"远程"是本地子进程管理；`WorkSecret` 机制已设计但未连接任何活跃网络端点；stdio JSON 通信在进程异常退出时缺乏健壮的重连机制 | Channel 适配器偏薄（仅处理纯文本，不支持富交互元素）；SSE 单向推送（无 WebSocket 双向通信）；无 per-channel 权限模型；IM 平台依赖平台侧 Webhook，本地开发需 ngrok 中转 |
 
 ## 设计权衡
 
@@ -67,3 +67,4 @@ sources: [claude-code, openharness]
 
 - [[channel-remote--claude-code]]
 - [[channel-remote--openharness]]
+- [[channel-remote--deer-flow]]

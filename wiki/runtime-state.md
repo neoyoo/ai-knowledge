@@ -9,7 +9,7 @@ relations:
     type: feeds
   - target: "[[session-recovery]]"
     type: feeds
-sources: [claude-code, openharness]
+sources: [claude-code, openharness, deer-flow]
 ---
 
 ## 一句话定义
@@ -24,11 +24,11 @@ Agent 运行时的状态容器 — 管理当前会话信息、配置、运行模
 
 ## 各家对比
 
-| 维度 | Claude Code | OpenHarness |
-|------|------------|-------------|
-| 核心设计 | `AppStateStore`（统一状态树）+ `REPL.tsx`（交互运行时协调器）：前者承载 agent 工作台完整状态（权限/任务/MCP/IDE），后者串联 prompt 构建、query 驱动、工具审批 UI 和 hooks 生命周期 | 分为两层：`AppState`（31 字段 frozen dataclass，通过 `dataclasses.replace()` 不可变更新）+ `RuntimeBundle`（聚合所有活跃运行时对象的 dataclass，在调用栈中显式传递，替代隐式单例） |
-| 关键特点 | REPL 不是薄渲染层，而是 prompt 构建参与者 + 工具审批 UI 持有者；工具审批 UI 与权限记录和 prompt 规则形成完整闭环；通过 async generator yield 机制解耦 REPL 与 query.ts | `RuntimeBundle` 显式传递，依赖关系透明可见，测试只需构造含 mock 对象的 bundle；frozen dataclass + `dataclasses.replace()` 使状态变更可追踪；`AppStateStore` 极简手写 40 行，无框架依赖 |
-| 局限 | AppStateStore 边界不清，新功能容易随意挂载导致状态树膨胀；REPL.tsx 职责过重，局部修改影响面难以评估 | 无响应式/异步状态传播，状态变更需手动调用 `sync_app_state()`；手写 observable 缺乏错误隔离，单个订阅者抛异常可能影响其他订阅者 |
+| 维度 | Claude Code | OpenHarness | DeerFlow |
+|------|------------|-------------|----------|
+| 核心设计 | `AppStateStore`（统一状态树）+ `REPL.tsx`（交互运行时协调器）：前者承载 agent 工作台完整状态（权限/任务/MCP/IDE），后者串联 prompt 构建、query 驱动、工具审批 UI 和 hooks 生命周期 | 分为两层：`AppState`（31 字段 frozen dataclass，通过 `dataclasses.replace()` 不可变更新）+ `RuntimeBundle`（聚合所有活跃运行时对象的 dataclass，在调用栈中显式传递，替代隐式单例） | `ThreadState` TypedDict 在 LangGraph `AgentState` 基础上扩展工作区路径、产物、todos、上传文件等字段；持久化完全委托给 LangGraph checkpointer；虚拟路径抽象（`/mnt/user-data/` → `threads/{thread_id}/`），agent 逻辑与存储布局解耦 |
+| 关键特点 | REPL 不是薄渲染层，而是 prompt 构建参与者 + 工具审批 UI 持有者；工具审批 UI 与权限记录和 prompt 规则形成完整闭环；通过 async generator yield 机制解耦 REPL 与 query.ts | `RuntimeBundle` 显式传递，依赖关系透明可见，测试只需构造含 mock 对象的 bundle；frozen dataclass + `dataclasses.replace()` 使状态变更可追踪；`AppStateStore` 极简手写 40 行，无框架依赖 | 虚拟路径抽象：agent 无任何 thread-specific 路径硬编码；checkpointer 委托持久化：无需自实现序列化层；自定义 reducer（`merge_artifacts`/`merge_viewed_images`）实现语义化合并而非覆盖；`todos` 字段跨 turn 追踪任务进度 |
+| 局限 | AppStateStore 边界不清，新功能容易随意挂载导致状态树膨胀；REPL.tsx 职责过重，局部修改影响面难以评估 | 无响应式/异步状态传播，状态变更需手动调用 `sync_app_state()`；手写 observable 缺乏错误隔离，单个订阅者抛异常可能影响其他订阅者 | State schema 固定（TypedDict 无法无侵入追加自定义字段）；无响应式状态传播；checkpointer 与文件系统副作用一致性边界模糊 |
 
 ## 设计权衡
 
@@ -58,3 +58,4 @@ Agent 运行时的状态容器 — 管理当前会话信息、配置、运行模
 
 - [[runtime-state--claude-code]]
 - [[runtime-state--openharness]]
+- [[runtime-state--deer-flow]]

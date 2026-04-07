@@ -9,7 +9,7 @@ relations:
     type: uses
   - target: "[[query-loop]]"
     type: extends
-sources: [claude-code, openharness]
+sources: [claude-code, openharness, deer-flow]
 ---
 
 ## 一句话定义
@@ -24,11 +24,11 @@ Agent 断了怎么办 — checkpoint 保存、状态恢复、容错机制。
 
 ## 各家对比
 
-| 维度 | Claude Code | OpenHarness |
-|------|------------|-------------|
-| 核心设计 | 恢复"工作现场"而非重放聊天记录：将 file history、attribution state、context collapse 状态、worktree session、agent type、cost state 等完整 runtime state 持久化，跨进程重启后从中断点继续工作 | 以纯 JSON 文件为存储介质，每个 user turn 结束后自动快照完整会话状态（含完整 messages 列表、usage 统计、80 字符摘要），支持 `--continue`（恢复最近）和 `--resume`（恢复指定）两个 CLI 标志；整个实现仅 178 行 |
-| 关键特点 | 交互模式与 headless 模式共享同一套恢复逻辑（`processResumedConversation` 统一协调）；worktree 恢复用 `process.chdir()` 做 TOCTOU-safe 存在性检查；fork session 时提前 seed content-replacement 记录防止 tool_use_id 匹配失败 | 人类可读存储（纯 JSON，无 SQLite、无二进制格式，可直接用文本编辑器查看）；天然可移植（JSON 文件可直接拷贝跨机器迁移）；`export_session_markdown()` 支持将会话导出为 Markdown 归档 |
-| 局限 | context collapse 恢复依赖 feature flag；coordinator 模式不匹配只报 warning 不强制中断；worktree 被删除后静默降级不告知用户 | Session ID 每次调用生成新 uuid，无法跨生命周期保持稳定标识；仅 turn 间快照，turn 执行中途崩溃无法恢复；无命名会话，只能通过 id 或"最近"定位 |
+| 维度 | Claude Code | OpenHarness | DeerFlow |
+|------|------------|-------------|----------|
+| 核心设计 | 恢复"工作现场"而非重放聊天记录：将 file history、attribution state、context collapse 状态、worktree session、agent type、cost state 等完整 runtime state 持久化，跨进程重启后从中断点继续工作 | 以纯 JSON 文件为存储介质，每个 user turn 结束后自动快照完整会话状态（含完整 messages 列表、usage 统计、80 字符摘要），支持 `--continue`（恢复最近）和 `--resume`（恢复指定）两个 CLI 标志；整个实现仅 178 行 | 持久化完全委托给 LangGraph checkpointer（支持内存/SQLite/Postgres 三档），每个 agent 步骤完成后自动保存 ThreadState（包含消息历史、沙箱状态、产物、todos），恢复只需传入相同 `thread_id`，agent 自身零代码实现 session recovery |
+| 关键特点 | 交互模式与 headless 模式共享同一套恢复逻辑（`processResumedConversation` 统一协调）；worktree 恢复用 `process.chdir()` 做 TOCTOU-safe 存在性检查；fork session 时提前 seed content-replacement 记录防止 tool_use_id 匹配失败 | 人类可读存储（纯 JSON，无 SQLite、无二进制格式，可直接用文本编辑器查看）；天然可移植（JSON 文件可直接拷贝跨机器迁移）；`export_session_markdown()` 支持将会话导出为 Markdown 归档 | 零代码持久化（agent 逻辑完全不涉及存储细节）；per-step checkpoint（每个 tool call/model call 完成后立即保存，粒度细于 per-turn）；三档切换无缝（只改配置文件）；Postgres 支持横向扩展 |
+| 局限 | context collapse 恢复依赖 feature flag；coordinator 模式不匹配只报 warning 不强制中断；worktree 被删除后静默降级不告知用户 | Session ID 每次调用生成新 uuid，无法跨生命周期保持稳定标识；仅 turn 间快照，turn 执行中途崩溃无法恢复；无命名会话，只能通过 id 或"最近"定位 | Checkpoint 不透明（序列化格式不可读，调试困难）；无人类可读导出；存储无限增长（无自动 TTL 或清理）；跨 checkpointer 迁移难 |
 
 ## 设计权衡
 
@@ -65,3 +65,4 @@ Agent 断了怎么办 — checkpoint 保存、状态恢复、容错机制。
 
 - [[session-recovery--claude-code]]
 - [[session-recovery--openharness]]
+- [[session-recovery--deer-flow]]

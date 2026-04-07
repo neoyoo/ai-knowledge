@@ -7,7 +7,7 @@ updated: 2026-04-06
 relations:
   - target: "[[query-loop]]"
     type: extends
-sources: [claude-code, openharness]
+sources: [claude-code, openharness, deer-flow]
 ---
 
 ## 一句话定义
@@ -23,11 +23,11 @@ sources: [claude-code, openharness]
 
 ## 各家对比
 
-| 维度 | Claude Code | OpenHarness |
-|------|------------|-------------|
-| 核心设计 | 完整类型化事件系统（28+ 事件类型）+ shell 子进程执行引擎 + 双向 JSON 通信协议，来源支持用户配置/Skills/Plugins 三路合并注册 | 4 种事件类型（SESSION_START/END、PRE/POST_TOOL_USE）+ 4 种 hook 类型（command、http、prompt、agent），通过 `settings.json` 或插件 `hooks.json` 声明；`HookReloader` mtime 轮询实现热重载 |
-| 关键特点 | Hook 可做权限决策（allow/deny）且不能绕过 settings.json deny 规则；异步 hook 模式不阻塞主循环；原子性 plugin hook 热重载（clear-then-register 解决卸载后 ghost hook 问题） | LLM 评估型 hook（`prompt`/`agent` 类型）允许用自然语言描述策略条件，无需编写脚本即可实现语义级 policy enforcement；mtime 热重载使 hook 调试无需重启进程；`block_on_failure: true` 可让 PRE_TOOL_USE hook 失败时阻断工具执行 |
-| 局限 | Hook 本质是 shell 子进程，隔离性依赖 shell 安全；matcher 只匹配工具名，不支持对工具参数的条件匹配 | 仅 4 种事件，相比 Claude Code 28+ 事件，可干预的节点非常有限；缺乏类似 Zod 的运行时 schema 校验；所有 hook 串行执行，无并发调度 |
+| 维度 | Claude Code | OpenHarness | DeerFlow |
+|------|------------|-------------|----------|
+| 核心设计 | 完整类型化事件系统（28+ 事件类型）+ shell 子进程执行引擎 + 双向 JSON 通信协议，来源支持用户配置/Skills/Plugins 三路合并注册 | 4 种事件类型（SESSION_START/END、PRE/POST_TOOL_USE）+ 4 种 hook 类型（command、http、prompt、agent），通过 `settings.json` 或插件 `hooks.json` 声明；`HookReloader` mtime 轮询实现热重载 | 无传统 hooks，以 middleware pipeline 作为扩展机制：每个 middleware 类暴露 `before_model`/`after_model`/`before_agent`/`after_agent`/`wrap_tool_call` 五个切入点，功能覆盖 hooks 所有典型场景且可访问完整 agent 状态 |
+| 关键特点 | Hook 可做权限决策（allow/deny）且不能绕过 settings.json deny 规则；异步 hook 模式不阻塞主循环；原子性 plugin hook 热重载（clear-then-register 解决卸载后 ghost hook 问题） | LLM 评估型 hook（`prompt`/`agent` 类型）允许用自然语言描述策略条件，无需编写脚本即可实现语义级 policy enforcement；mtime 热重载使 hook 调试无需重启进程；`block_on_failure: true` 可让 PRE_TOOL_USE hook 失败时阻断工具执行 | `@Next/@Prev` 装饰器无侵入插入（自定义 middleware 可精确指定位置，不修改框架源码）；GuardrailMiddleware 作为独立策略引擎（安全策略与 middleware 机制解耦）；Python 类实现类型安全，IDE 可做静态检查 |
+| 局限 | Hook 本质是 shell 子进程，隔离性依赖 shell 安全；matcher 只匹配工具名，不支持对工具参数的条件匹配 | 仅 4 种事件，相比 Claude Code 28+ 事件，可干预的节点非常有限；缺乏类似 Zod 的运行时 schema 校验；所有 hook 串行执行，无并发调度 | 无 shell-command hooks（集成外部自动化必须写 Python middleware）；无热重载（新 middleware 需重启服务）；无内置 LLM 评估策略（GuardrailProvider 无内置 LLM 评估器） |
 
 ## 设计权衡
 
@@ -65,3 +65,4 @@ Shell 命令是最通用的接口：任意语言都能接入，行为对用户�
 
 - [[hooks--claude-code]]
 - [[hooks--openharness]]
+- [[hooks--deer-flow]]

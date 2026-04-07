@@ -9,7 +9,7 @@ relations:
     type: extends
   - target: "[[query-loop]]"
     type: feeds
-sources: [claude-code, openharness]
+sources: [claude-code, openharness, deer-flow]
 ---
 
 ## 一句话定义
@@ -25,11 +25,11 @@ Agent 运行时中负责发现、选择、调用和管理外部工具的子系�
 
 ## 各家对比
 
-| 维度 | Claude Code | OpenHarness |
-|------|------------|-------------|
-| 核心设计 | 完整的工具执行运行时（Tool Execution Runtime）：工具协议对象 + 分层工具池 + 批处理/流式双引擎，权限控制深度嵌入形成"模型可见性 + OS 级沙箱"双层防线 | 以 `BaseTool` 抽象类为核心，每个工具携带 Pydantic 输入模型，通过 `to_api_schema()` 自动生成 Anthropic 兼容 JSON Schema；MCP 工具通过 `McpToolAdapter` 全自动包装，注册表是普通 `dict[str, BaseTool]` |
-| 关键特点 | Fail-closed 并发安全（`isConcurrencySafe` 默认串行）；流式预启动（模型生成时提前启动工具）；三层工具池分离"存在/可见/可执行"三个边界 | Pydantic `input_model` 兼顾参数验证与 API Schema 生成，一套定义两用；`McpToolAdapter` 通过 `create_model()` 实现 MCP 工具零手工接入；工具自我声明只读性（`is_read_only()`），权限逻辑下沉到工具层 |
-| 局限 | MCP 工具的并发安全声明依赖外部 server，可靠性低于内建工具；自动审批分类器决策逻辑对用户不可见 | 无工具分组或上下文条件过滤，所有工具始终全量暴露，工具数量增多后增大模型上下文压力；无工具调用重试或降级策略 |
+| 维度 | Claude Code | OpenHarness | DeerFlow |
+|------|------------|-------------|----------|
+| 核心设计 | 完整的工具执行运行时（Tool Execution Runtime）：工具协议对象 + 分层工具池 + 批处理/流式双引擎，权限控制深度嵌入形成"模型可见性 + OS 级沙箱"双层防线 | 以 `BaseTool` 抽象类为核心，每个工具携带 Pydantic 输入模型，通过 `to_api_schema()` 自动生成 Anthropic 兼容 JSON Schema；MCP 工具通过 `McpToolAdapter` 全自动包装，注册表是普通 `dict[str, BaseTool]` | `get_available_tools()` 从配置工具、内置工具、MCP 扩展、ACP 跨框架 agent 四源聚合，引入延迟工具注册表（DeferredToolRegistry）：MCP 工具不暴露给模型，通过 `tool_search` 按需发现，从根本上解决大规模工具集的 token 膨胀问题 |
+| 关键特点 | Fail-closed 并发安全（`isConcurrencySafe` 默认串行）；流式预启动（模型生成时提前启动工具）；三层工具池分离"存在/可见/可执行"三个边界 | Pydantic `input_model` 兼顾参数验证与 API Schema 生成，一套定义两用；`McpToolAdapter` 通过 `create_model()` 实现 MCP 工具零手工接入；工具自我声明只读性（`is_read_only()`），权限逻辑下沉到工具层 | 延迟工具注册表彻底解决 MCP token 膨胀，是同类项目中最优雅的解法；护栏独立于调度（GuardrailMiddleware 是正交安全层，可独立替换）；ACP 跨框架调用（将其他框架 agent 注册为本地工具） |
+| 局限 | MCP 工具的并发安全声明依赖外部 server，可靠性低于内建工具；自动审批分类器决策逻辑对用户不可见 | 无工具分组或上下文条件过滤，所有工具始终全量暴露，工具数量增多后增大模型上下文压力；无工具调用重试或降级策略 | 护栏能力基础（规则型，不支持语义级策略）；tool_search 增加 RTT（延迟发现需额外一轮工具调用）；工具来源配置分散于两个文件 |
 
 ## 设计权衡
 
@@ -75,3 +75,4 @@ Agent 运行时中负责发现、选择、调用和管理外部工具的子系�
 
 - [[tool-system--claude-code]]
 - [[tool-system--openharness]]
+- [[tool-system--deer-flow]]

@@ -9,7 +9,7 @@ relations:
     type: uses
   - target: "[[runtime-state]]"
     type: uses
-sources: [claude-code, openharness, mirofish]
+sources: [claude-code, openharness, mirofish, deer-flow]
 ---
 
 ## 一句话定义
@@ -25,11 +25,11 @@ sources: [claude-code, openharness, mirofish]
 
 ## 各家对比
 
-| 维度 | Claude Code | OpenHarness | MiroFish |
-|------|------------|-------------|----------|
-| 核心设计 | 建立在正式任务系统之上的 agent orchestration runtime：每个子 agent 拥有独立执行环境、专属 MCP servers 和独立 transcript，通过 `AgentTool` 作为统一标准化入口被调度 | 以操作系统进程为隔离边界：每个子 agent 是独立的 `python -m openharness --headless` 子进程，以 UTF-8 文本行为通信协议；`BackgroundTaskManager` 负责进程生命周期，`SendMessageTool` 向子进程 stdin 写消息；核心逻辑约 280 行 | 环境介导通信——数百 agent 通过共享社交环境间接交互，行动即通信 |
-| 关键特点 | 任务系统先于多智能体（子 agent 结果包装为持久化 task）；拓扑弹性（同进程/tmux 多进程/远程 backend 透明切换）；Coordinator 作为一等公民（专用 system prompt + 工具集约束） | 零依赖隔离（子进程天然隔离，无共享内存、无锁）；极简通信协议（UTF-8 文本行，任何语言可互操作）；broken pipe 检测后自动重启子进程，提升长时任务稳定性 | 去中心化共识涌现；Zep 时序图谱做共享记忆；双平台并行模拟 |
-| 局限 | Coordinator 模式目前是单机的，缺乏真正的分布式协调；agent 间通过 mailbox（异步写文件）通信，延迟较高 | `TeamRecord` 仅存于内存，进程重启后团队关系丢失；单向消息通信，子 agent 无法主动回调协调者；无结果合并机制，子 agent 产出仅写入日志文件 | 重基础设施依赖；无法保证收敛；固定轮次终止 |
+| 维度 | Claude Code | OpenHarness | MiroFish | DeerFlow |
+|------|------------|-------------|----------|----------|
+| 核心设计 | 建立在正式任务系统之上的 agent orchestration runtime：每个子 agent 拥有独立执行环境、专属 MCP servers 和独立 transcript，通过 `AgentTool` 作为统一标准化入口被调度 | 以操作系统进程为隔离边界：每个子 agent 是独立的 `python -m openharness --headless` 子进程，以 UTF-8 文本行为通信协议；`BackgroundTaskManager` 负责进程生命周期，`SendMessageTool` 向子进程 stdin 写消息；核心逻辑约 280 行 | 环境介导通信——数百 agent 通过共享社交环境间接交互，行动即通信 | `task` 工具将主 agent 升级为 lead agent，子任务交给独立的 SubagentExecutor 实例在线程池中异步并行运行；双线程池（scheduler + execution）混合 async 事件循环；ACP 协议桥接外部 agent（Codex、Claude Code）纳入调度 |
+| 关键特点 | 任务系统先于多智能体（子 agent 结果包装为持久化 task）；拓扑弹性（同进程/tmux 多进程/远程 backend 透明切换）；Coordinator 作为一等公民（专用 system prompt + 工具集约束） | 零依赖隔离（子进程天然隔离，无共享内存、无锁）；极简通信协议（UTF-8 文本行，任何语言可互操作）；broken pipe 检测后自动重启子进程，提升长时任务稳定性 | 去中心化共识涌现；Zep 时序图谱做共享记忆；双平台并行模拟 | 线程池 + async 混合实现真并行；ACP 协议将外部 agent 系统纳入子 agent 调度；stream 事件实时透传子任务进度；SubagentLimitMiddleware 中间件限流（单次 model response 最多 3 个并发 task） |
+| 局限 | Coordinator 模式目前是单机的，缺乏真正的分布式协调；agent 间通过 mailbox（异步写文件）通信，延迟较高 | `TeamRecord` 仅存于内存，进程重启后团队关系丢失；单向消息通信，子 agent 无法主动回调协调者；无结果合并机制，子 agent 产出仅写入日志文件 | 重基础设施依赖；无法保证收敛；固定轮次终止 | 无递归嵌套（子 agent 不能再派发子 agent）；无 peer-to-peer 通信；5 秒轮询延迟；子 agent 无持久状态（每次 task 调用创建全新实例） |
 
 ## 设计权衡
 
@@ -85,3 +85,4 @@ sources: [claude-code, openharness, mirofish]
 - [[multi-agent--claude-code]]
 - [[multi-agent--openharness]]
 - [[multi-agent--mirofish]]
+- [[multi-agent--deer-flow]]
