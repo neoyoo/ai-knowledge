@@ -4,6 +4,6 @@
 
 ## 模式列表
 
-- [Tool Design Principles](tool-design-principles.md) — 怎样设计一个好工具：命名、描述、参数、权限
-- [Error Handling](error-handling.md) — 工具失败时的处理策略：重试、降级、用户确认
-- [Permission Model](permission-model.md) — 工具权限设计：只读/写分级、沙箱、用户确认
+- [Tool Design Principles](tool-design-principles.md) — 怎样设计一个 LLM 能正确理解和使用的工具——从命名到参数到描述的全套原则
+- [Error Handling](error-handling.md) — 工具调用失败时的处理策略——重试、降级、用户确认，确保 agent 不因一个工具失败而卡死
+- [Permission Model](permission-model.md) — 工具权限分级设计——哪些工具可以自动执行、哪些需要用户确认、哪些绝对禁止，保障 agent 安全运行
