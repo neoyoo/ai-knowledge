@@ -109,11 +109,11 @@ NeoAgent (agent.py)  ← 唯一入口：chat() / run()
 | **3. 加跨会话记忆** | MemoryManager | `memory_dir=Path(...)`, `memory_project_key="..."` |
 | **4. 加动态 Skill** | PromptBuilder | `agent._prompt_builder.register_skill(name, PromptSection(...))`→`activate_skill(name)` |
 | **5. 加事件 Hook** | HookManager + EventBus | config 注册 hook；`agent._event_bus.subscribe(EventType, handler)` |
-| **6. 接入 MCP 工具** | mcp/ + DeferredToolRegistry | `MCPClient` 连接 → 工具注入 ToolRegistry；LLM 用 `tool_search` 按需 promote |
+| **6. 接入 MCP 工具** | mcp/ + DeferredToolRegistry | `await agent.add_mcp_server(name, command, env)` → 工具自动注入 DeferredToolRegistry；LLM 用 `tool_search` 按需 promote |
 | **7. 多 Agent** | Orchestrator + WorkerCard | `Orchestrator(config, max_depth=2)`，`register_worker(WorkerCard(...))`，`await run(msg)` |
 | **8. HTTP 服务** | FastAPIChannel | `FastAPIChannel(agent)` → `await channel.run(host, port)` |
 | **9. 断点续传** | Session + JsonFileStorage | `session_dir=Path(...)`；`Session.resume(session_id, storage)` |
-| **10. 可观测性** | eval/ + observe.py | `observe.attach(agent)`；`EvalRunner(agent).run(test_cases)` |
+| **10. 可观测性** | eval/ + observe.py | `Observer(console=True)` + `ObserverSubscriber.attach(agent._event_bus)`；`EvalRunner(agent).run(test_cases)` |
 
 ---
 
@@ -190,12 +190,13 @@ agent._event_bus.subscribe(EventType.TOOL_EXECUTED, lambda e: print(e))
 
 ### 场景 6：接入 MCP 工具
 ```python
-from neoagent.mcp import MCPClient
-
-client = MCPClient(transport="stdio", command=["python", "my_mcp_server.py"])
-await client.connect()
-agent.register_mcp_client(client)
-# LLM 通过 tool_search 内置工具按需 promote MCP 工具
+# NeoAgent 直接管理 MCP server 生命周期
+await agent.add_mcp_server(
+    name="my_server",                         # 工具名前缀
+    command=["python", "my_mcp_server.py"],   # 启动命令
+    env={"API_KEY": "..."},                   # 可选环境变量
+)
+# 工具自动注入 DeferredToolRegistry，LLM 通过 tool_search 内置工具按需 promote
 ```
 
 ### 场景 7：多 Agent
@@ -236,11 +237,21 @@ result = await agent.chat("Continue from where we left off", session=session)
 
 ### 场景 10：可观测性
 ```python
-from neoagent import observe
+from pathlib import Path
+from neoagent.observe import Observer
+from neoagent.observe_subscriber import ObserverSubscriber
 from neoagent.eval import EvalRunner
 
-observe.attach(agent)   # 终端彩色日志
+# 终端彩色日志 + 文件输出
+observer = Observer(console=True, log_dir=Path("logs/"))
+subscriber = ObserverSubscriber(observer)
+subscriber.attach(agent._event_bus)   # 订阅 agent 的 EventBus
 
+# 关闭后清理
+subscriber.detach(agent._event_bus)
+observer.close()
+
+# 评估质量
 runner = EvalRunner(agent)
 metrics = await runner.run(test_cases)
 ```
@@ -264,7 +275,7 @@ metrics = await runner.run(test_cases)
 |------|------|------|
 | Skills 注册 | `agent._prompt_builder`（私有属性） | 需通过私有属性访问，未来版本可能变更 |
 | EventBus 订阅 | `agent._event_bus`（私有属性） | 同上 |
-| MCP 注册 | `register_mcp_client()` API 待确认 | 以 guide.md 为准 |
+| Observability 接入 | `agent._event_bus`（私有属性） | ObserverSubscriber 需通过私有属性访问 EventBus |
 
 ---
 
