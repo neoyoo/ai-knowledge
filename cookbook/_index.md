@@ -11,6 +11,9 @@
 | Prompt Anti-patterns | [prompts/anti-patterns/](prompts/anti-patterns/_index.md) | 常见提示词反模式（计划中） |
 | **Tool Definitions** | [tools/definitions/](tools/definitions/_index.md) | 按功能分类的工具定义：10 个类别，含跨项目对比和最佳实践 |
 | **Tool Patterns** | [tools/patterns/](tools/patterns/_index.md) | 工具设计与编排模式：设计原则、错误处理、权限模型 |
+| **Skill Patterns** | [skills/patterns/](skills/patterns/_index.md) | 5 种 skill 类型的结构模式：纯文本、多文档导航、Agent Dispatch、CLI 集成、Hook 触发 |
+| **Skill Templates** | [skills/templates/](skills/templates/_index.md) | 可直接复制的 skill 文件模板：知识/规则型、工作流型、工具集成型 |
+| **Skill Anti-patterns** | [skills/anti-patterns/](skills/anti-patterns/_index.md) | 常见 skill 设计错误：内容容器滥用、触发描述缺失、重复造轮子 |
 
 ## 怎么用
 
