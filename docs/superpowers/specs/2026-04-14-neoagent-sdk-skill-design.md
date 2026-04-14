@@ -10,13 +10,40 @@
 
 构建一个 Claude Code skill，让 LLM 能够：
 
-1. **写新 agent 代码**：拿到需求后，选择正确的 neoagent 模块组合，写出可运行的代码
+1. **写新 agent 代码**：拿到需求后，选择正确的 neoagent 模块组合，写出 **production-ready** 的代码——不只是能跑，而是有多年工程经验的 senior engineer 才写得出的优雅代码
 2. **读懂/调试现有 agent**：看到 neoagent 代码时，理解模块间的数据流和调用链
 
 Skill 位置：`~/.claude/skills/neoagent/SKILL.md`（全局安装，任何项目可调用）
 
 触发描述：
 > "Use when building agents with the neoagent SDK, understanding how SDK modules connect, adding capabilities (memory / custom tools / multi-agent / hooks / HTTP channel), or reading/debugging existing neoagent code."
+
+---
+
+## 1.1 代码质量标准（Production-Ready 定义）
+
+Skill 生成的所有代码必须满足以下标准，任何一条不达标都不算完成：
+
+### 正确性
+- 权限最小化：`BaseTool.permission` 默认 `"ask"`，只有明确无副作用的读操作才用 `"auto"`
+- 并发安全声明准确：`is_concurrent_safe=True` 仅在工具真正无共享状态时设置
+- `context_budget` 根据任务场景显式设置，不依赖默认值
+- 异步边界清晰：`await` 不遗漏，不在 `async def` 里调同步阻塞 IO
+
+### 性能与资源
+- **禁止在循环中做网络/IO 调用**：批量操作用 `asyncio.gather()`，MCP 工具调用同理
+- **连接池复用**：MCP client、HTTP session 生命周期绑定 agent，不在每次调用时重建
+- **上下文管理器管理资源**：用 `async with` / `try/finally` 确保 `client.close()` / `observer.close()` 必定执行
+
+### 架构解耦
+- **事件驱动优先**：可观测性、监控、日志通过 EventBus 订阅实现，不侵入核心逻辑
+- **依赖注入**：tool、config、storage 从外部传入，不在类内部硬编码
+- **单一职责**：每个 BaseTool 子类只做一件事，副作用显式声明
+
+### 代码可读性
+- 链式语法优先（where applicable）：配置构建用 dataclass，初始化流程清晰线性
+- 注释规范：每个 `BaseTool` 的 `description` 字段是给 LLM 看的 prompt（精确、无歧义）；代码注释解释 **why**，不解释 **what**
+- 类型注解完整：所有公开方法参数和返回值有类型标注
 
 ---
 
@@ -254,6 +281,52 @@ observer.close()
 # 评估质量
 runner = EvalRunner(agent)
 metrics = await runner.run(test_cases)
+```
+
+---
+
+## 5.x 常见反模式（Skill 必须阻止 LLM 写出这些）
+
+```python
+# ❌ 循环中重复建连接（每次调用都 connect → 资源泄漏 + 性能瓶颈）
+for item in items:
+    client = MCPClient(...)
+    await client.connect()
+    result = await client.call_tool(item)
+
+# ✅ 连接池：client 生命周期绑 agent，复用连接
+await agent.add_mcp_server(name="server", command=[...])
+# agent 内部管理 client 生命周期，tools 自动注册
+
+# ❌ permission=auto 滥用（写操作也给 auto）
+class WriteTool(BaseTool):
+    permission = "auto"   # 危险：写操作应该是 ask
+
+# ✅ 权限最小化
+class WriteTool(BaseTool):
+    permission = "ask"    # 写操作需要确认
+
+# ❌ 资源不释放
+observer = Observer(log_dir=Path("logs/"))
+subscriber = ObserverSubscriber(observer)
+subscriber.attach(agent._event_bus)
+# ... 忘记 detach + close
+
+# ✅ 用上下文管理器或 try/finally 确保清理
+try:
+    subscriber.attach(agent._event_bus)
+    result = await agent.chat(message)
+finally:
+    subscriber.detach(agent._event_bus)
+    observer.close()
+
+# ❌ 并发场景下共享状态的工具声明 is_concurrent_safe=True
+class DatabaseTool(BaseTool):
+    is_concurrent_safe = True   # 如果 tool 内部有 shared state，这是 bug
+
+# ✅ 只有真正无状态的工具才能声明并发安全
+class ReadFileTool(BaseTool):
+    is_concurrent_safe = True   # 只读，无副作用 ✓
 ```
 
 ---
