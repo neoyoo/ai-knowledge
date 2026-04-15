@@ -1,0 +1,20 @@
+# kb-ingest 执行策略文件
+# 由 Phase 7 自动蒸馏生成，人工确认后 apply
+# 每次 ingest 启动时自动读取
+#
+# 格式：
+#   strategies:
+#     - id:      唯一 ID（kebab-case）
+#       trigger: 触发条件（自然语言）
+#       rule:    可执行策略规则
+#       source:  来源 ingest 项目名（逗号分隔）
+#       added:   添加日期（YYYY-MM-DD）
+
+version: "1.0"
+strategies: []
+# 首条策略示例（请在积累 5 次 ingest 经验后通过蒸馏流程添加真实策略）:
+#   - id: python-utils-deep-scan
+#     trigger: "源项目主语言 == Python"
+#     rule: "utils/ 和 lib/ 子目录必须深度扫描（逐文件列出），不列入覆盖率排除名单"
+#     source: "示例：mempalace, hermes"
+#     added: "2026-04-15"
