@@ -1,0 +1,76 @@
+# L1 Patch: evaluation-observability.md
+
+**生成时间**: 2026-04-19
+**基于 L2**: `drafts/neoagent/wiki/_impl/evaluation-observability--neoagent.md`
+**目标 L1**: `wiki/evaluation-observability.md`（已存在）
+
+---
+
+## OP-1：在「各家对比」表中新增 `neoagent` 列
+
+**位置**：`wiki/evaluation-observability.md:28-32`
+
+| 行 | neoagent 单元格内容 |
+|----|---------------------|
+| 核心设计 | 三层架构：**EventBus + 16 种 frozen dataclass 事件**（Provider/Tool/Compress/Memory/Skill/Turn/Worker/Task/SessionResume/ToolResult lifecycle）作为唯一观测通道；**三个 Subscriber 适配器**：`ObserverSubscriber`（日志化，conversation-style 角色着色 + 文件 log）、`MetricsCollector`（per-turn `TurnMetrics` latency/tokens/tool_call_count）、`UsageTracker`（per-model token 累计）；**`EvalRunner` + `EvalCase/Result/Report`** 批量评估框架：每 case 独立 MetricsCollector + try/finally 成对 unsubscribe + 异常不中断剩余用例 + async assertion 支持（`inspect.isawaitable`） |
+| 关键特点 | **三 Subscriber 独立注册**：`enable_logging()` + `enable_metrics()` + `enable_usage_tracking()` 三 API 组合使用互不干扰；**`enable_logging` 幂等**（先 detach 旧 subscriber + close 旧 observer 再建新的，防泄漏）；**EvalRunner 双重 try 分层捕获**：外层 agent 异常 / 内层 assertion 异常归因到 `error = "agent raised: ..." / "assertion raised: ..."`——eval 失败直接知道是 agent 问题还是 assertion 写错；**WorkerEvent 嵌套冒泡**让 orchestrator Observer 单订阅看到全部层级；**Observer `_truncate(text, 500)` 到屏幕 + 写文件 full body**（`_write(console_line, full=file_line)`）——debug 看全文 CLI 看摘要 |
+| 局限 | **`SkillChangeEvent` 和 `ToolResultRecalledEvent` 定义了但未发射**（TODO v3.2）——skill 生命周期和 recall 行为无法被观测；**`MemoryExtractEvent.filenames = ()` 未填充**（loop.py:249 注释明写）——只知道"存了 N 条"不知道"哪些文件"；**EventBus handler 必须 sync**（async handler 返回 coroutine 不执行）；**无 subscription filter**（想"只听 tool_name='write_file' 的 ToolCall"必须 handler 自己 filter，大部署性能差）；ToolCallEvent 无 turn 字段（MetricsCollector 只能启发式 assign 给 max pending turn）；`UsageTracker._current_model` 静态 snapshot（runtime 切 model 不跟随）；无内置 OTEL 支持；EvalRunner 只支持 sequential（无 asyncio.gather 并发） |
+
+---
+
+## OP-2：在「场景决策指南」追加新场景建议
+
+**位置**：`wiki/evaluation-observability.md` 场景决策指南部分末尾
+
+### 如果你要做小型框架的"拦截 + 观测"双系统 → hooks（决策）+ EventBus（观测）正交分离（neoagent 模式）
+
+- **原因**：常见错误是把 hook 和 event 混为一套（以 handler 返回值决定是否阻断主流程）——导致"纯观测的 callback"也意外能影响执行流，增加脆弱性。neoagent 严格分离：
+  - **HookManager** 4 种 hook + `HookResult(allow/deny/modify)`：handler 返回值决策主流程；**只在 pre/post tool+provider 4 个切入点**
+  - **EventBus** 16 种 event type + `subscribe(type, handler)` + handler 返回 None：只广播不影响主流程；**无死角的观测覆盖**
+- **代码证据**：
+  - `neoagent/hooks.py:132-263` — HookManager 完整实现
+  - `neoagent/events.py:180-205` — EventBus 核心（25 行）
+  - 两文件零交叉 import——物理解耦
+- **与已有源对比**：Hermes Agent 的双轨是 **Callback（平台集成）+ Plugin Hook（第三方）**——按 consumer 切分；neoagent 的双轨是 **决策 + 观测**——按能力切分。两种切分模式正交，可共存。
+
+### 如果你做 agent eval 批跑 → 每 case 独立 collector + finally unsubscribe 成对
+
+- **原因**：eval 框架最难的是"long-running 批次中保持 metric 干净"——如果 handler 在 case 间残留，case N 的 metrics 会包含 case N-1 的 token。neoagent 的 `EvalRunner._run_case`:
+  ```python
+  collector = MetricsCollector()    # 每 case 独立实例
+  try:
+      # subscribe 4 handlers
+      try: result = await agent.run(...)
+      except Exception: error = "agent raised: ..."
+      try: passed = await assertion(result)
+      except Exception: error = "assertion raised: ..."
+  finally:
+      # 4 次 unsubscribe 成对清理
+  return EvalCaseResult(..., metrics=collector.get_session_metrics())
+  ```
+- **关键细节**：双重 try 分层归因错误类型；finally 保证即使 assertion 抛异常 handler 也清理；每 case 独立 collector 意味着 EvalCaseResult.metrics 严格只包含本 case 数据。
+- **代码证据**：`neoagent/eval/runner.py:93-149` — `_run_case` 完整实现。
+- **与已有源对比**：DeerFlow 无独立 eval 框架（靠 LangSmith）；Hermes BatchRunner 面向 RL 训练数据质量门禁 vs 功能 eval；OpenHarness/Claude Code 无内置 batch eval runner。neoagent 的 EvalRunner 是**最小化但语义明确**的功能级 eval 基础设施。
+
+### 如果你做 multi-agent 可观测 → WorkerEvent(worker_name, task_id, depth, inner=原 event) 嵌套模式
+
+- **原因**：多 agent 最大观测痛点是"worker 里发生了什么"。传统做法是每 worker 单独日志文件——orchestrator 层看不到全貌、需要事后合并。neoagent 的 `_setup_event_bubble` 订阅 worker bus **全 16 事件**，包成 `WorkerEvent(inner=原事件)` 发射到 orchestrator bus——Observer 一个订阅看到全链路。
+- **嵌套结构价值**：`WorkerEvent(depth=0, inner=WorkerEvent(depth=1, inner=ToolCallEvent(...)))` 保留"谁 spawn 了谁"的层级血缘，Observer 可按 depth 缩进输出完整 trace 树。
+- **代码证据**：`neoagent/multi/events.py:18-63` — `_setup_event_bubble` + teardown；`neoagent/events.py:140-165` — WorkerEvent / TaskDispatchEvent / TaskCompleteEvent。
+- **成本**：每 worker 订阅全部 16 事件，1000 tool call × 10 worker = 10000 次 bubble handler 调用；大规模场景需要评估事件量。
+
+---
+
+## OP-3：新跨概念关系
+
+（在 multi-agent 的 patch 已添加 `multi-agent feeds evaluation-observability`）neoagent 的 Event Bubble 证实该关系：worker 层级的可观测性并非独立实现，而是通过 multi-agent 层的 event bubble 基础设施喂给 evaluation-observability 层。
+
+OP-3: 见 multi-agent patch 的 OP-3（不重复添加）
+
+---
+
+## 摘要
+
+- OP-1：新增 neoagent 列（3 行 × 1 列）
+- OP-2：追加 3 条场景建议（hooks+EventBus 正交 + 每 case 独立 collector + WorkerEvent 嵌套）
+- OP-3：已在 multi-agent patch 记录

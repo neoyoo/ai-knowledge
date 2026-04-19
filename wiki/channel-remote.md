@@ -9,6 +9,9 @@ relations:
     type: uses
   - target: "[[runtime-state]]"
     type: uses
+  - target: "[[sandbox-isolation]]"
+    type: feeds
+    evidence: "HTTP/WS channel 暴露后威胁模型从'本机单用户'跳到'多租户 SaaS'，agent 所有代码执行工具必须从 subprocess 弱沙箱升级到容器/微 VM 级隔离；channel 的开放程度直接决定 sandbox-isolation 的档次要求"
 sources: [claude-code, openharness, deer-flow, hermes-agent]
 ---
 

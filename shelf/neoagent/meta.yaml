@@ -1,0 +1,47 @@
+source_name: "neoagent"
+source_path: "/Users/neo/Desktop/project/git/neoagent/"
+source_version: "9d3621d3cf2717ee989dd954bd159d9d4c9a20db"
+ingest_time: "2026-04-19T11:45:00Z"
+kb_path: "/Users/neo/Desktop/project/git/ai- knowledge/"
+concepts_covered:
+  - query-loop
+  - prompt-system
+  - tool-system
+  - context-management
+  - memory-system
+  - session-recovery
+  - hooks
+  - channel-remote
+  - multi-agent
+  - mcp-skills
+  - evaluation-observability
+coverage_rate: 1.0
+l2_files:
+  - wiki/_impl/query-loop--neoagent.md
+  - wiki/_impl/prompt-system--neoagent.md
+  - wiki/_impl/tool-system--neoagent.md
+  - wiki/_impl/context-management--neoagent.md
+  - wiki/_impl/memory-system--neoagent.md
+  - wiki/_impl/session-recovery--neoagent.md
+  - wiki/_impl/hooks--neoagent.md
+  - wiki/_impl/channel-remote--neoagent.md
+  - wiki/_impl/multi-agent--neoagent.md
+  - wiki/_impl/evaluation-observability--neoagent.md
+l1_patches:
+  - wiki/query-loop.md.patch
+  - wiki/prompt-system.md.patch
+  - wiki/tool-system.md.patch
+  - wiki/context-management.md.patch
+  - wiki/memory-system.md.patch
+  - wiki/session-recovery.md.patch
+  - wiki/hooks.md.patch
+  - wiki/channel-remote.md.patch
+  - wiki/multi-agent.md.patch
+  - wiki/mcp-skills.md.patch
+  - wiki/evaluation-observability.md.patch
+status: READY_TO_MERGE
+review_summary:
+  auto_fixed: 0
+  pending_review: 0
+  blocked: 0
+notes: "全部 10 个 L2 confidence=high；11 个 L1 patches（mcp-skills 追加为 11 个，因为 neoagent 的 MCP + Skill 双栈实现丰富值得单独 patch）；两条新 L1 关系：(1) tool-system supports context-management（auto_free_after 协议驱动）；(2) multi-agent feeds evaluation-observability（WorkerEvent 嵌套冒泡）。建议合并到 wiki/ 而非 shelf/，原创设计密度高。"

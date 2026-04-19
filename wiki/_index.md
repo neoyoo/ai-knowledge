@@ -1,7 +1,7 @@
 ---
 title: AI Agent Knowledge Base
 category: index
-updated: 2026-04-06
+updated: 2026-04-19
 ---
 
 # AI Agent Knowledge Base
@@ -20,6 +20,7 @@ updated: 2026-04-06
 - [[tool-system]] — 工具发现/调用/管理
 - [[memory-system]] — 跨会话持久记忆
 - [[multi-agent]] — 多 agent 协作
+- [[agent-registry-discovery]] — Agent 注册与发现（Agent OS 的地址总线）
 
 ### Extension
 - [[hooks]] — 事件驱动扩展点
@@ -29,6 +30,7 @@ updated: 2026-04-06
 ### Reliability
 - [[session-recovery]] — 断点恢复与容错
 - [[evaluation-observability]] — 效果评估 + 运行可观测
+- [[sandbox-isolation]] — LLM 授权代码执行的隔离机制
 
 ## 来源项目
 

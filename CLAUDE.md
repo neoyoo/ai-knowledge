@@ -18,6 +18,44 @@
 | Evaluation | 基准、评估框架、指标 |
 | Context & Memory | 长对话、压缩、检索增强 |
 
+## 目录结构
+
+| 目录 | 作用 | 内容性质 | 合入规则 |
+|-----|------|---------|---------|
+| `raw/` | 原始材料区 | 每个源项目的 git clone / symlink（agentscope、claude-code、deer-flow、hermes、mempalace、neoagent、openharness、simplemem …） | 不可变。只读取，不修改 |
+| `wiki/` | 正式知识主干 | 顶层 `*.md` 为 L1 概念页（按架构维度组织，如 `tool-system.md`、`sandbox-isolation.md`）；`_impl/<concept>--<source>.md` 为 L2 per-source 实现分析；`_insights/<source>--<design>.md` 为单源精彩设计抽出；`_patterns/<slug>.md` 为**跨 L1 概念的组合模式**（可迁移架构语汇）；`_index.md` 总索引 | 只放通过质量门禁的成熟内容 |
+| `ideas/` | **好想法 inbox**（新） | 任何"值得但未落地"的想法，一想一页，frontmatter 带 `status: inbox\|incubating\|promoted\|dead`。定期 review 决定升级到 wiki/_patterns/ 或 wiki/_insights/ 或 practice/ 或宣布死亡 | 轻格式、低门槛、定期整理 |
+| `cookbook/` | 实操层（"怎么动手做"） | `prompts/`（patterns、templates、anti-patterns）+ `tools/`（definitions 按功能分类、patterns、anti-patterns）+ `skills/`（patterns、templates、anti-patterns）| 实操模板和可复制 schema，和 wiki 的"为什么这样设计"互补 |
+| `schema/` | 配置与规范 | `ontology.yaml`（关系类型定义）、`lint-rules.yaml`（linter 规则）、`ingest-strategies.yaml`（ingest 策略）、`page-templates/`（L1.md / L2.md 模板）、`ingest-learnings.md`（每次 ingest 积累的经验） | 仅修改规范、不放知识内容 |
+| `shelf/` | 归档区（不合入主干） | 质量不够、架构不稳定、尚未成熟的源。每个项目带 `SHELF.md` 说明归档原因。完整 L2 分析保留以便查阅 | 不合并到 `wiki/`。L2 页保留可查，L1 patch 仅作参考不应用 |
+| `drafts/` | kb-ingest 工作中区 | 在跑/刚完成但未决定去向的 ingest 产物 | 完成后按质量决策：合入 `wiki/` 或搬去 `shelf/`，搬完应清空 |
+| `docs/` | 知识库元文档 | `sdk-kb-alignment.md`（SDK 与 KB 的版本对齐追踪）等。**不是** 被 ingest 的知识，**是** 关于 KB 项目本身的说明 | 维护 KB 运营所需的表格、对齐记录 |
+| `.obsidian/` | Obsidian vault 配置 | vault 设置、图谱视图、插件配置 | Obsidian 自管，不手工维护 |
+| `.claude/` | Claude Code 项目配置 | 本项目专用 claude skills、settings | 按 Claude Code 约定维护 |
+
+### 目录关系示意
+
+```
+raw/       ──  ingest  ──→  drafts/  ──  review  ──┬─→  wiki/     (主干，被权威引用)
+(不可变源)                   (工作中)               ├─→  wiki/_insights/ (单源精彩设计)
+                                                    └─→  shelf/    (保留但不入主干)
+                                                         │
+                                                         └─→ SHELF.md（候选提升项 → ideas/）
+
+ideas/      ←── 闪念入口 ──→  wiki/_patterns/  (跨概念组合模式)
+(好想法 inbox)                 wiki/_insights/  (单源洞察)
+(定期 review 决定升级)         practice/        (我们做过的，待建)
+                                cookbook/        (通用模板)
+
+schema/     ←──── 规则约束 ────→   wiki/ / cookbook/
+(ontology、lint、templates、ingest-learnings)
+
+cookbook/   ←── 实操互补 ──→   wiki/
+("怎么做")                      ("为什么这样")
+
+docs/       关于 KB 本身的记录（sdk-kb-alignment 等），不属于知识内容
+```
+
 ## 架构
 
 ### 三层结构

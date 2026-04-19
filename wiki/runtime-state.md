@@ -15,6 +15,9 @@ relations:
   - target: "[[session-recovery]]"
     type: supports
     evidence: "AgentScope StateModule 递归序列化 + SessionBase 三后端为 session-recovery 提供了框架无关的通用快照/恢复路径，补充了 DeerFlow/LangGraph checkpointer 绑定框架的另一极设计"
+  - target: "[[sandbox-isolation]]"
+    type: supports
+    evidence: "持久 IPython kernel 模式（E2B/agentscope-runtime）要求沙箱会话生命周期绑定 runtime session，创建/暂停/销毁需要协调；runtime-state 的 session 边界决定了 sandbox-isolation 的资源归属粒度"
 sources: [claude-code, openharness, deer-flow, hermes-agent, agentscope]
 ---
 

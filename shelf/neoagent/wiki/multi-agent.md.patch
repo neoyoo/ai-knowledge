@@ -1,0 +1,75 @@
+# L1 Patch: multi-agent.md
+
+**生成时间**: 2026-04-19
+**基于 L2**: `drafts/neoagent/wiki/_impl/multi-agent--neoagent.md`
+**目标 L1**: `wiki/multi-agent.md`（已存在）
+
+---
+
+## OP-1：在「各家对比」表中新增 `neoagent` 列
+
+**位置**：`wiki/multi-agent.md:34-38`
+
+| 行 | neoagent 单元格内容 |
+|----|---------------------|
+| 核心设计 | 经典 **Orchestrator + Worker 层级结构**（`multi/` 6 文件 844 行）：`Orchestrator` = brain（一个 NeoAgent 实例）+ 5 个内部工具（`spawn_worker` / `delegate_task` / `cancel_task` / `list_workers` / `list_tasks`），让 LLM 自主拆解任务；**`WorkerCard`** 是 frozen dataclass 从 `.md` YAML frontmatter 解析（name/description/instruction/tags/model/tools）；**`Task/TaskResult/TaskTracker`** 三元组含 `asyncio.timeout` + CancelledError 处理 + 工作摘要提取（`_extract_work_summary` 纯逻辑不调 LLM）；`asyncio.Semaphore(max_concurrent_workers=5)` 控资源 |
+| 关键特点 | **Event Bubble 机制**：`_setup_event_bubble` 订阅 worker event bus 全 16 种事件，包成 `WorkerEvent(worker_name, task_id, depth, inner)` 发射到 orchestrator bus——orchestrator Observer 一个订阅看到全部层级的事件流 + 保留原事件结构；**递归深度 + SpawnWorkerTool(depth+1)** 让子 worker 也能 spawn 子子 worker 直到 max_depth；**Worker 不包含 DelegateTaskTool**（只有 SpawnWorkerTool）——worker 不知道 pool 里有哪些静态角色，刻意限制避免策略复杂化；**`_tool_pool` 独立于 ToolRegistry**：worker 按 `card.tools` 白名单领取 `copy.copy(tool)` 实例（权限最小化 + 实例隔离）；**`spawn_worker.md_definition`** 直接由 LLM 生成 markdown，临时创建角色无需预先注册 |
+| 局限 | `copy.copy(tool)` 浅拷贝：tool 含可变字段（如 MemoryStore）时多 worker 共享底层对象（潜在状态污染）；静态 worker 不支持 MCP 工具（`card.tools` 只匹配 `_tool_pool` 注册的工具）；brain/worker 共享 api_key（硬编码）无法细粒度计费/权限隔离；Worker context_budget 全部继承同一值（reviewer 和 code-writer 不能差异化）；等待 semaphore 队列中的 task 无法真 cancel（`asyncio_task is None → no-op`）但 list_tasks 仍显示 active——UI 困惑；无 CostTracker 聚合，10 个 worker 各自 10K tokens 时 brain 不会主动停；无 cycle detection 只靠 max_depth；.md worker 定义里 `tools: [Read]` 拼错时静默 skip 不报错 |
+
+---
+
+## OP-2：在「场景决策指南」追加新场景建议
+
+**位置**：`wiki/multi-agent.md` 场景决策指南部分末尾
+
+### 如果你需要 "小而全" 的 Orchestrator + Worker 框架（不依赖 LangGraph / AutoGen）→ neoagent 模式
+
+- **原因**：AutoGen / LangGraph 等 multi-agent 框架引入重型依赖和复杂抽象；Claude Code 的 Agent Tool 强耦合其任务系统。neoagent 在 844 行代码里实现完整 orchestrator+worker 流程：
+  - WorkerCard 从 markdown 加载（agent 定义在版本控制里，类似 `.claude/commands/`）
+  - Brain 和 Worker 都是 NeoAgent（递归结构简洁，无新类型抽象）
+  - spawn_worker 让 LLM 临时发明角色（无需预先注册）
+  - Event bubble 保留完整层级血缘（WorkerEvent 嵌套显示"谁 spawn 了谁"）
+- **代码证据**：
+  - `neoagent/multi/orchestrator.py:36-118` — Orchestrator 构造
+  - `neoagent/multi/worker.py:74-143` — `_create_worker_agent` 配 NeoAgentConfig + card.tools 白名单
+  - `neoagent/multi/events.py:18-63` — `_setup_event_bubble` subscribe_all + teardown
+- **注意**：neoagent 的 multi-agent 是**树形层级**（worker 只能 spawn，不能 delegate 回 pool），如果你需要 peer-to-peer 通信或 mesh topology 要自己实现。
+
+### 如果你需要"全链路可观测 multi-agent 流" → WorkerEvent 嵌套冒泡模式
+
+- **原因**：多 agent 场景下最大痛点是 "我不知道 worker 里发生了什么"——worker A spawn worker B 时，上层 Observer 通常看不到 B 的 tool call。neoagent 的做法是在 worker 创建时 `_setup_event_bubble(worker_agent, orchestrator, worker_name, task_id, depth)` subscribe worker bus **全 16 种事件**，包成 `WorkerEvent(worker_name, task_id, depth, inner=原 event)` 发射到 orchestrator bus。
+- **嵌套结构**：orchestrator Observer 看到形如 `WorkerEvent(depth=0, inner=WorkerEvent(depth=1, inner=ToolCallEvent(name='read', ...)))`——保留完整层级信息，可以按 depth 缩进输出全链路 trace。
+- **代码证据**：
+  - `neoagent/multi/events.py:18-63` — `_setup_event_bubble` 实现
+  - `neoagent/events.py:148-165` — `WorkerEvent / TaskDispatchEvent / TaskCompleteEvent`
+- **与已有源对比**：Claude Code 的子 agent 有独立 transcript（无全链路聚合）；Hermes 的 SubagentLimitMiddleware 只限流不聚合事件；AgentScope MsgHub 广播消息但不是事件。neoagent 的 event bubble 是**目前分析源中唯一的 "全链路嵌套事件" 实现**。
+- **成本**：每个 worker 都订阅 `subscribe_all` 触发全部 16 种事件，生产场景需要评估事件量（如 1000 次 tool call × 10 worker = 10000 bubble 调用）。
+
+### 如果你要 dynamic spawn 临时 worker（LLM 决定要什么角色）→ spawn_worker + .md definition 模式
+
+- **原因**：预注册全部可能需要的 worker 不现实——LLM 看过任务后才知道要"Postgres DBA"还是"Kubernetes 专家"。neoagent 的 `SpawnWorkerTool(input={"md_definition": "---\nname:...\ntools:[...]\n---\n系统 prompt"})` 让 LLM 临时构造 WorkerCard（不加入 WorkerPool，ephemeral）。
+- **代码证据**：`neoagent/multi/tools/spawn_worker.py:22-41` — `md_definition + instruction` 双参数；`:66-73` — `parse_worker_md` 解析。
+- **与已有源对比**：DeerFlow / Hermes 只支持静态 worker delegation（`delegate_task(worker_name, instruction)`）；spawn_worker 是**唯一让 LLM 自己写 agent definition** 的设计。
+- **注意**：LLM 构造 .md 可能带错（如工具名拼错），`_create_worker_agent` 对未知 tool 名 `logger.debug(... skipping)` 静默 skip——worker 会少工具但不报错。要严格性需要在 parser 层加 tool 名存在性校验。
+
+---
+
+## OP-3：新跨概念关系
+
+neoagent 的 Event Bubble 机制揭示一条值得记录的关系：**multi-agent → evaluation-observability 的 feeds 关系**——worker 的事件流通过 WorkerEvent 包装回馈到 orchestrator 的 observability 通道，让上层 Observer 天然获得全链路 trace。
+
+建议在 `wiki/multi-agent.md` 的 `relations` frontmatter 追加：
+
+```yaml
+  - target: "[[evaluation-observability]]"
+    type: feeds
+    evidence: "neoagent 的 _setup_event_bubble 把 worker event bus 的全部事件包成 WorkerEvent(worker_name, task_id, depth, inner) 发射到 orchestrator bus，让 Observer 在单订阅中获得完整层级血缘，orchestrator 级可观测性由 multi-agent 层的事件冒泡基础设施直接提供"
+```
+
+---
+
+## 摘要
+
+- OP-1：新增 neoagent 列（3 行 × 1 列）
+- OP-2：追加 3 条场景建议（小而全框架 + WorkerEvent 嵌套观测 + spawn_worker dynamic worker）
+- OP-3：新增 multi-agent feeds evaluation-observability 关系

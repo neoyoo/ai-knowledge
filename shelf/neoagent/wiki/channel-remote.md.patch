@@ -1,0 +1,63 @@
+# L1 Patch: channel-remote.md
+
+**生成时间**: 2026-04-19
+**基于 L2**: `drafts/neoagent/wiki/_impl/channel-remote--neoagent.md`
+**目标 L1**: `wiki/channel-remote.md`（已存在）
+
+---
+
+## OP-1：在「各家对比」表中新增 `neoagent` 列
+
+**位置**：`wiki/channel-remote.md:27-31`
+
+| 行 | neoagent 单元格内容 |
+|----|---------------------|
+| 核心设计 | `Channel` ABC（4 抽象方法：`__init__(agent)` / `start` / `stop` / `serve_forever`）+ 单一具体实现 `FastAPIChannel`（357 行）；三端点：`GET /v1/health`（跳过鉴权）、`POST /v1/run`（同步返回 ConversationResult）、`POST /v1/run/stream`（SSE 流）；**每请求 stateless session**（无跨请求记忆）；`asyncio.Lock` 串行化保证同一 NeoAgent 不被并发请求竞态；MCP `StdioTransport` 作为体系外另一种"远程"通信（subprocess stdio JSON-RPC，env 白名单 + stderr drain） |
+| 关键特点 | **`asyncio.Queue` 桥接同步 EventBus → async SSE generator**：EventBus handler 是 sync callback，queue.put_nowait 配 `await queue.get()` 把事件流过 async generator，不修改 bus 同步设计；**`_on_done` 把 exception 一并 put 进 queue**：让 generator 单循环 `while True: await queue.get()` 同时处理完成/异常/正常事件；**`finally` 双重清理**（unsubscribe handlers + cancel agent_task）防止客户端断连时泄漏；Bearer API key middleware + CORS 可选；Lazy FastAPI import（`pip install neoagent[fastapi]` extras 机制）让核心包无 fastapi 依赖；StdioTransport 的 env 白名单只传 9 个安全键（无 API_KEY 等），`start_new_session=True` 配 `os.killpg` 超时可一键杀进程组 |
+| 局限 | **唯一 Channel 实现是 FastAPI**：无 WebSocket / gRPC / MQ；每请求 stateless 无法跨请求复用 session；`asyncio.Lock` 串行化限吞吐（多用户必须多 channel 实例 + 前端 LB）；SSE event 粒度只有 4 种（ToolCall/ToolResult/TurnComplete/ProviderResponse），无 text token streaming（打字机效果前端做不了）；无 request_id 关联 event（高并发日志追踪困难）；MCP `SseTransport` 留空（transport.py 注释 "Reserved for future, not implemented"），远程 MCP server 无法接入；MCP 无自动重连；API key 校验非时序安全（字节级 `!=` 提前退出） |
+
+---
+
+## OP-2：在「场景决策指南」追加新场景建议
+
+**位置**：`wiki/channel-remote.md` 场景决策指南部分末尾
+
+### 如果你需要同步 EventBus 桥接到 async 流式响应（SSE/WebSocket）→ asyncio.Queue producer-consumer 模式
+
+- **原因**：常见设计错误——在 async SSE generator 里 `for event in bus.events: yield ...`，但 EventBus 是 sync handler 触发不适合迭代。neoagent 的正确做法：SSE generator 开始时给 bus 注册 sync handler，handler 调 `queue.put_nowait(event)`；async generator 循环 `item = await queue.get()` 消费——queue 天然桥接两个 async/sync 世界。
+- **关键细节**：
+  1. `queue: asyncio.Queue[Event | BaseException | None] = asyncio.Queue()` — union type 能承载正常事件 + 异常 + 完成信号（None）
+  2. `agent_task.add_done_callback(lambda fut: queue.put_nowait(fut.exception() or None))` — agent 完成或异常时把结果 put 进 queue，让 generator 的单循环既能处理事件流也能感知退出
+  3. `finally` 块 unsubscribe handler + cancel agent_task — 客户端断连时资源不泄漏
+- **代码证据**：`neoagent/channels/fastapi_channel.py:296-357` — `_sse_generator` 全部实现；`_event_to_sse_data` 定制化 SSE payload 结构。
+- **常见陷阱**：
+  - 直接 `async for event in bus.events: yield` — bus 没有 async iterator 接口，会报错或阻塞
+  - 只 unsubscribe 不 cancel agent_task — 客户端断连但 agent 还在跑消耗 token
+  - 不用 Queue 而用 asyncio.Event + list — 失序和 race condition
+
+### 如果你的 channel 挂一个 NeoAgent 实例且要并发请求安全 → 加 asyncio.Lock 串行化 + 多 channel 实例水平扩展
+
+- **原因**：NeoAgent 内部有 mutable 状态（ToolRegistry 的 _deferred_registry、PromptBuilder 的 _sections 等），两个并发请求同时调 `agent.run()` 可能污染共享状态。neoagent 用 **`self._run_lock = asyncio.Lock()`** 在 `/v1/run` 和 `/v1/run/stream` 入口各自 `async with lock`，保证同一 channel 实例串行处理——吞吐受限但安全。
+- **扩展方案**：水平扩展靠多个 channel 实例（每个 bind 不同 NeoAgent）+ 前端负载均衡；别让单实例服务大量用户。
+- **代码证据**：`neoagent/channels/fastapi_channel.py:169` — `self._run_lock = asyncio.Lock()`；`:261, :323` — `async with self._run_lock` 入口。
+
+### 如果你需要 MCP 子进程在 stderr 写大量诊断信息 → Transport 必须 drain stderr 防死锁
+
+- **原因**：subprocess 的 pipe buffer 是 OS 级固定大小（Linux 默认 64K），stderr 不被消费时写满后 `stderr.write()` 阻塞，子进程挂起。neoagent 的 `StdioTransport._drain_stderr` 是后台 async task 持续 `readline + log.debug`，即使内容不关心也要 "读走"——这是 subprocess 长期运行的必需防护。
+- **代码证据**：`neoagent/mcp/transport.py:80-99` — `_drain_stderr` 实现；`:78` — connect 时 `self._stderr_task = asyncio.create_task(self._drain_stderr())`。
+
+---
+
+## OP-3：无新跨概念关系
+
+channel-remote 与 query-loop / runtime-state 的现有关系完全印证。
+
+OP-3: 无新跨概念关系发现
+
+---
+
+## 摘要
+
+- OP-1：新增 neoagent 列（3 行 × 1 列）
+- OP-2：追加 3 条场景建议（asyncio.Queue 桥接 + Lock 串行化 + stderr drain）
+- OP-3：无需新增

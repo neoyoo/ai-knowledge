@@ -15,6 +15,9 @@ relations:
   - target: "[[evaluation-observability]]"
     type: supports
     evidence: "AgentScope Toolkit 的执行路径最外层为 @trace_toolkit（OpenTelemetry span），所有工具调用自动产生可观测性 span，无需上层 agent 代码显式埋点；这是同类项目中唯一把 OTEL 追踪作为工具系统内置层的实现"
+  - target: "[[sandbox-isolation]]"
+    type: depends_on
+    evidence: "代码执行类工具（run_python/bash/code_interpreter）的隔离强度决定了整个工具系统的安全边界上限；不同沙箱档次（subprocess/Docker/gVisor/Firecracker/WASM）支撑的威胁模型不同，直接约束 tool-system 可暴露给外部用户的工具集"
 sources: [claude-code, openharness, deer-flow, hermes-agent, agentscope]
 ---
 

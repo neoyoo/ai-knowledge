@@ -1,0 +1,70 @@
+# L1 Patch: mcp-skills.md
+
+**生成时间**: 2026-04-19
+**基于 L2**: `drafts/neoagent/wiki/_impl/mcp-skills--neoagent.md`
+**目标 L1**: `wiki/mcp-skills.md`（已存在）
+
+---
+
+## OP-1：在「各家对比」表中新增 `neoagent` 列
+
+**位置**：`wiki/mcp-skills.md:31-35`
+
+| 行 | neoagent 单元格内容 |
+|----|---------------------|
+| 核心设计 | **MCP 侧**：`MCPClient`（JSON-RPC 2.0 + `_pending` 乱序响应缓冲 + `notifications/initialized` 跳过）+ `MCPTool`（JSON Schema → Pydantic 递归转换，支持 array/object/enum/Literal）+ `DeferredToolRegistry`（注册但隐藏，三模式 `search`: `select:` / `+kw` / regex）+ `StdioTransport` 唯一 transport；**Skill 侧**：`SkillLoadTool`（三 layout：`.md` / `{name}/SKILL.md` / `learned/{name}/SKILL.md` + `allowed` 白名单）+ `WriteSkillTool`（agent 自我成长，kebab-case 校验 + 只能写 `learned/`）+ `PromptBuilder.register/activate/deactivate_skill` 三态 |
+| 关键特点 | **Session-scoped MCP 提升**（`SessionState.promoted_tools` + 全局 `is_deferred()` OR 逻辑）：FastAPI 并发请求各自独立 MCP 可见范围，不污染邻居；**`tool_search` 只返 name+description 不返 schema**：schema 下一轮才对 LLM 可见，强制"search 之后等下一轮"handshake 节约 token；**Learned skill 绕过 allowed 白名单**：`write_skill` 产生的 `skills_dir/learned/{name}/SKILL.md` 下次 `list_skills` 无条件包含——agent 自我扩展闭环；`add_mcp_server` 自动检测 shell metacharacters（`re.search(r'[;&|` + '`' + `$(){}]')`） 拒绝可疑 binary 名；首个 MCP server 自动注册 `ToolSearchTool`（不用 MCP 用户无污染）；env 白名单 9 键（无 API_KEY 等） |
+| 局限 | 只有 StdioTransport（`SseTransport` 注释 "Reserved for future, not implemented"），远程 MCP server 无法接入；Skill prompt injection 无自动化（`skill_load` 返回 markdown 后应用代码必须自己 register + activate，框架不自动）；Learned skill 无版本 / 无 sunset（写错的 skill 永远污染库）；MCPTool.permission 默认 "ask" 无 per-server 配置；JSON Schema 转 Pydantic 不处理 `oneOf`/`anyOf`/`$ref`（fallback Any）；MCP 子进程 crash 无自动重连；`ToolSearchTool` 一次提升所有 match 无 Top-N 限制（regex 搜到 50 个一次全 promote）；多 MCP server 工具名前缀只防同名，重复 add_mcp_server("github", ...) 会 ToolRegistry 注册冲突 |
+
+---
+
+## OP-2：在「场景决策指南」追加新场景建议
+
+**位置**：`wiki/mcp-skills.md` 场景决策指南部分末尾
+
+### 如果你部署 agent 到多用户 Web 服务 + 多 MCP server → session-scoped 提升（neoagent 模式）
+
+- **原因**：DeerFlow 的 DeferredToolRegistry 是全局单例，promote 后所有 session 都看到这工具——对 FastAPI 多用户场景，用户 A 提升了 github 工具，用户 B 的下一轮请求会莫名其妙看到 github 工具。neoagent 把 promote 状态写到 `SessionState.promoted_tools`（session 级），QueryLoop 判断工具可见性时用 **OR 逻辑**：`session_promoted OR global_is_deferred == False` —— session 级隔离 + 全局 backward-compat 兼顾。
+- **代码证据**：
+  - `neoagent/session.py:33` — `promoted_tools: set[str] = field(default_factory=set)`
+  - `neoagent/core/loop.py:131-149` — OR 逻辑的 `_is_hidden` 闭包
+  - `neoagent/tools/builtin/tool_search.py:108-114` — 写 session_state.promoted_tools + 全局 promote
+- **与已有源对比**：AgentScope 的工具组激活状态是进程单例（注释 "工具组激活状态为进程内单例，跨 session 恢复需重新注册"）——和 neoagent 同样的并发痛点但未解；DeerFlow 全局 DeferredRegistry 的同样问题未公开讨论。neoagent 的 session-scoped + ContextVar 是**并发环境下最完整的 MCP 提升隔离方案**。
+
+### 如果你要做 agent 自我成长（agent writes learned skills）→ learned/ 绕过白名单模式
+
+- **原因**：传统 skill 系统都有安全问题——agent 调 `write_skill` 写入后，下一轮 `list_skills` 该按什么规则暴露？全部暴露容易污染知识空间，走审批又打断自动成长闭环。neoagent 的设计：
+  - 预定义 skill 必须在 `allowed` 白名单（外部控制，用户/运营定义）
+  - **learned/ 下的 skill 绕过白名单**——agent 自己写的，认为默认安全
+  - `WriteSkillTool` 只能写入 `learned_dir`（隔离目录），不能覆盖用户预定义 skill
+- **关键代码**：
+  - `neoagent/tools/builtin/skill_load.py:98-103` — `is_learned = "learned" in path.parts ...` → 绕过 `allowed` 检查
+  - `neoagent/tools/builtin/write_skill.py:81-86` — 只能写 `learned_dir / skill_name / SKILL.md`
+  - `neoagent/tools/builtin/write_skill.py:69-79` — kebab-case 正则 `^[a-z0-9]+(-[a-z0-9]+)*$` 校验
+- **与已有源对比**：
+  - DeerFlow 的 `skill_manage` 支持 agent 创建新 skill 但没有"白名单绕过"的隔离机制——预定义和 agent 生成在同一空间
+  - Hermes Skills Hub 是中心化 + 信任分级模型需要外部审批流程——自动化闭环打断
+  - neoagent 的设计是**信任"agent 自己写的默认安全" + 隔离目录防止误覆盖**，形成最短闭环；代价是质量无审核（agent 可能写垃圾 skill 永久污染）
+- **注意**：生产部署若不希望 agent 自扩展（多租户/公有云），构造 SkillLoadTool 时不注册 WriteSkillTool 即可（`NeoAgent` 不自动注册，需用户显式 `register_tool`）。
+
+### 如果你的 MCP server 可能乱序返回响应（高并发请求）→ `_pending` 缓冲机制
+
+- **原因**：JSON-RPC 2.0 规范允许 server 不按请求顺序返回响应（尤其 server 并行处理多个工具调用时）。简单的 "send 后 receive 并匹配 id" 会挂死——收到非匹配 id 时不知道怎么办。neoagent 的 `MCPClient._request` 用 `self._pending: dict[int, dict]` 缓冲乱序响应：收到非当前 id 的就 put 进 _pending，下一个 `_request` 开头检查 _pending 有无自己的 id。
+- **代码证据**：`neoagent/mcp/client.py:37-93` — `_pending` 字段 + 循环 receive 里 `self._pending[msg_id] = msg` + 下次请求开头 `if req_id in self._pending: return self._pending.pop(req_id)`。
+- **当前限制**：neoagent 的 `_request` 还是串行调用（没有 asyncio.Lock 但也没 concurrent 使用），`_pending` 的威力在未来扩展并发 MCP 调用时才真正显现。
+
+---
+
+## OP-3：无新跨概念关系
+
+mcp-skills 与 tool-system extends、multi-agent depends_on 的现有关系完全印证。
+
+OP-3: 无新跨概念关系发现
+
+---
+
+## 摘要
+
+- OP-1：新增 neoagent 列（3 行 × 1 列）
+- OP-2：追加 3 条场景建议（session-scoped 提升 + learned/ 绕过 + `_pending` 乱序缓冲）
+- OP-3：无需新增
