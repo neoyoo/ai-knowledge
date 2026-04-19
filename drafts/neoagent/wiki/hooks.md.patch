@@ -1,0 +1,61 @@
+# L1 Patch: hooks.md
+
+**生成时间**: 2026-04-19
+**基于 L2**: `drafts/neoagent/wiki/_impl/hooks--neoagent.md`
+**目标 L1**: `wiki/hooks.md`（已存在）
+
+---
+
+## OP-1：在「各家对比」表中新增 `neoagent` 列
+
+**位置**：`wiki/hooks.md:29-33`
+
+| 行 | neoagent 单元格内容 |
+|----|---------------------|
+| 核心设计 | **双轨**（类似 Hermes 但更小规模）：`HookManager`（263 行）管拦截/修改，`EventBus`（25 行核心 + 16 事件类型）管观测/广播，两系统不互相依赖；HookManager 支持 4 种 hook type（pre/post × tool/provider），返回 `HookResult(allow/deny/modify)` 三态；**frozen dataclass + MappingProxyType/tuple 强制不可变**——handler 无法通过 in-place mutation 绕过协议；modify 通过 `dataclasses.replace(event, **diff)` 构造新 event 链式传递（chain-of-responsibility 纯函数式）|
+| 关键特点 | **pre_tool_call hook modify 后二次权限检查**（`executor.py:112-124`，注释明写"hooks must not bypass PermissionChecker by substituting a safe input with a dangerous one"）——防御 hook 被滥用为权限绕过通道；**Priority + seq 稳定排序**：`_HookEntry(priority, seq, handler)` 的 `seq` 是单调递增计数器，保证同 priority handler 按注册顺序执行；**Handler 异常不中断 chain**：`log.warning + continue`；**`__post_init__` 强制不可变**：即使 handler 作者传普通 dict/list，`object.__setattr__` 自动转为 `MappingProxyType(dict(...))` / `tuple(...)`——类型系统层面强制协议；post hook 的 deny 被代码注释明确忽略（"execution already happened"） |
+| 局限 | 事件粒度少（4 种 vs Claude Code 28 种 vs AgentScope 元类注入 5 个切入点）——想拦截 memory 抽取/压缩/skill 激活必须改源码；无 matcher 机制（注册时不能声明 "只匹配工具名 'write_file' 的 pre_tool_call"）；无 shell / LLM 评估型 hook（必须写 Python async function）；EventBus handler 必须是 sync（async handler 返回 coroutine 不执行）；`SkillChangeEvent` / `ToolResultRecalledEvent` 定义了但未发射；`MappingProxyType(copy.deepcopy(call.input))` 高频工具调用时 deepcopy 开销可观；pre_provider_call modify 的 `tools` 不 revalidate schema（hook 可偷偷加不存在工具诱导 LLM 幻觉） |
+
+---
+
+## OP-2：在「场景决策指南」追加新场景建议
+
+**位置**：`wiki/hooks.md` 场景决策指南部分末尾
+
+### 如果你需要"拦截 + 观测"但不想引入重型依赖 → 双轨分离（HookManager + EventBus，neoagent 模式）
+
+- **原因**：AgentScope 把 hook 做成元类编译期注入 —— 强大但复杂，改 reply/print/observe/reasoning/acting 5 个方法；Claude Code 是完整事件系统 + shell hook，但核心循环复杂。很多团队需要"小但对"：hook 管决策，events 管观测，两套不混淆、不互相依赖、都易测。neoagent 用 400 行代码实现：
+  - HookManager：4 hook type + 三态 HookResult，frozen dataclass 强制不可变——hook 作者不能偷偷 mutate 共享状态
+  - EventBus：dict 订阅 + 16 frozen event types，handler 异常不中断，`subscribe_all` 一行订阅全部
+- **代码证据**：
+  - `neoagent/hooks.py:132-263` — HookManager 全部实现（register / run_pre / run_post / `_apply_modify`）
+  - `neoagent/events.py:180-205` — EventBus 核心（25 行 emit/subscribe/subscribe_all）
+  - `neoagent/tools/executor.py:93-124` — hooks 嵌入 ToolExecutor 主路径
+- **与已有源对比**：
+  - **vs Hermes Agent 双轨（9 Callback + 10 Plugin hook）**：neoagent 的两轨是 **hooks 管决策 + events 管观测**（正交职责），Hermes 的两轨是 **Callback 面向平台集成 + Plugin hook 面向第三方**（正交消费者）——两种不同切分维度。
+  - **vs AgentScope 元类注入**：AgentScope 支持实例级 + 类级 hook 作用域，更精细但有继承共享 bug（团队已知）；neoagent 只有全局注册表一种级别，简单但灵活度低。
+
+### 如果你担心 hook 被滥用为权限绕过 → 敏感 hook 必须走二次权限检查
+
+- **原因**：pre_tool_call hook modify `tool_input` 是一把双刃剑——允许"在 LLM 请求后净化参数"的合法场景，但也意味着恶意 hook 能把 `{path: "/tmp/foo"}` 改成 `{path: "/etc/passwd"}`。neoagent 的 ToolExecutor 在 pre hook modify 后**重新走 PermissionChecker.check**，防御这种攻击。
+- **代码证据**：
+  - `neoagent/tools/executor.py:107-124` — pre hook modify 后的 `validated_input = tool.input_model.model_validate(call.input)` + 重跑权限检查
+  - 代码注释 L112-115 明写设计意图："Re-run permission check on the modified input — hooks must not be able to bypass PermissionChecker by substituting a safe input with a dangerous one after the initial check passed"
+- **与已有源对比**：Hermes Agent 的 Plugin `pre_tool_call` hook 可以 modify 但没有二次权限检查（因为权限模型本身极薄）；Claude Code 的 hook 是 shell 子进程 deny 决策，决策层本身即 hook，不存在"modify 后绕过"的问题。neoagent 在同路线（函数 hook）里是**唯一主动防御这类绕过**的项目。
+- **注意**：二次检查只在 `pre_tool_call` 做——`pre_provider_call` 改 `tools` 列表时没有对等的 schema 校验（hook 可以偷偷加不存在的工具描述诱导 LLM 幻觉调用）。如果你担心 provider-level 绕过，需要自己在 post_provider_call 做 response validation。
+
+---
+
+## OP-3：无新跨概念关系
+
+neoagent 的 hooks 关系与现有 `[[query-loop]] extends` 和 `[[tool-system]] depends_on` 完全一致。
+
+OP-3: 无新跨概念关系发现
+
+---
+
+## 摘要
+
+- OP-1：新增 neoagent 列（3 行 × 1 列）
+- OP-2：追加 2 条场景建议（双轨小规模 + hook 权限绕过防御）
+- OP-3：无需新增
