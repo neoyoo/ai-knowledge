@@ -1,0 +1,97 @@
+# L1 Patch: multi-agent ← agentscope
+生成时间: 2026-04-15
+基于 L2: drafts/agentscope/wiki/_impl/multi-agent--agentscope.md
+目标 L1: wiki/multi-agent.md（已存在）
+
+---
+
+## OP-1: 新增对比表列
+
+### 插入位置
+
+在 L1「各家对比」表的表头行末尾新增 `| AgentScope |` 列，并在对应数据行末追加以下内容。
+
+**表头行**（当前末列为 `Hermes Agent`，在其后追加）：
+
+```
+| AgentScope |
+```
+
+**核心设计行**追加：
+
+```
+| 三正交抽象：`pipeline`（编排拓扑）+ `MsgHub`（广播总线）+ `A2AAgent`（跨进程透明代理）。pipeline 分 SequentialPipeline / FanoutPipeline 两种原语；MsgHub 为异步上下文管理器，自动注入/清除订阅关系；A2AAgent 继承 AgentBase，使远程 agent 对编排层完全透明；`PlanNotebook` 模块为单 agent 提供可工具化调用的子任务状态机 |
+```
+
+**关键特点行**追加：
+
+```
+| `async with MsgHub(...)` 自动管理订阅生命周期，退出时清除，防止消息跨轮泄露；`fanout_pipeline` 对每个 agent 深拷贝消息，天然并发安全；A2A 标准化（Google A2A 协议）使远程 agent 与本地 agent 接口一致，服务发现支持文件/Well-Known/Nacos 三策略；`DefaultPlanToHint` 将执行状态机外置为差异化 Prompt，根据子任务状态生成引导提示 |
+```
+
+**局限行**追加：
+
+```
+| A2A 协议仅支持双角色（user/assistant），跨 agent 对话历史无法原生传递；MsgHub 广播粒度是全员，无法选择性路由（如 A 只发给 B）；PlanNotebook 子任务严格串行（前序全完成才可激活下一个），无法并行；InMemoryPlanStorage 无持久化，重启丢失；ChatRoom 与 RealtimeAgent 强绑定，普通 LLM agent 不可用 |
+```
+
+---
+
+## OP-2: 场景决策补充
+
+在 L1「设计权衡 → 场景决策指南」末尾（「如果是固定的多阶段工作流」之后），追加以下内容：
+
+---
+
+**如果需要多 agent 共享消息上下文（"聊天室"模式）→ MsgHub 广播**
+
+当多个 agent 需要实时感知彼此的每条回复（如辩论、联合规划），MsgHub 是比手动串联消息更干净的选择：进入 `async with MsgHub(participants=[a, b, c])` 后，任一 agent 的 `reply()` 自动调用所有其他成员的 `observe()`，无需手动传递消息。
+
+代码证据（`src/agentscope/pipeline/_msghub.py`）：
+```python
+async with MsgHub(participants=[agent_a, agent_b, agent_c]) as hub:
+    msg = await agent_a(initial_msg)   # a 回复后自动广播给 b、c
+    msg = await agent_b(msg)           # b 回复后自动广播给 a、c
+```
+
+与已有源对比：
+- 相比 MiroFish 的"环境介导"（共享社交环境做中介），MsgHub 是结构化的显式订阅，适合有明确参与者集合的小组讨论（5-10 人），不适合数百 agent 的大规模涌现场景。
+- 相比 Hermes Agent 的 `delegate_task`（主从派发），MsgHub 是对等广播，无主从层级，适合对等审查而非任务分发。
+
+**注意**：MsgHub 广播粒度是全员，无法做"A 发给 B 但不发给 C"。如需非全连接拓扑，需退出 MsgHub 手动调用 `observe()`。
+
+---
+
+**如果子任务有严格先后顺序依赖，且需要 LLM 自主跟踪执行状态 → PlanNotebook**
+
+当单个 agent 需要管理多步骤串行计划（如"调研 → 起草 → 审校 → 发布"），且希望 agent 通过 tool call 自主推进状态，PlanNotebook 是专门为此设计的模块。状态机约束（前序全完成才可激活下一个）防止 agent 跳步，`DefaultPlanToHint` 根据当前状态自动生成引导 prompt 推动 agent 执行下一步。
+
+代码证据（`src/agentscope/plan/_plan_notebook.py`）：
+```python
+# agent 通过 tool call 推进子任务
+await notebook.finish_subtask(subtask_idx=0, subtask_outcome="调研完成，找到 3 个竞品")
+# 自动激活 subtask_idx=1，DefaultPlanToHint 生成"请执行下一步：起草"的提示
+```
+
+与已有源对比：
+- 相比 DeerFlow 的 `task` 工具（主 agent → SubagentExecutor 并行子任务），PlanNotebook 是**单 agent 内部**的串行计划跟踪，颗粒度更细，但不支持并行。两者可组合使用：用 DeerFlow 的并发机制跑多个带 PlanNotebook 的子 agent。
+- 局限：PlanNotebook 不支持并行子任务（与 pipeline 层的 fanout 能力形成断层），且无持久化存储，进程重启后计划丢失。
+
+---
+
+## OP-3: 跨概念关系
+
+在 L1 frontmatter `relations` 字段中追加以下条目：
+
+```yaml
+  - target: "[[context-memory]]"
+    type: depends_on
+    note: "MsgHub 广播依赖 AgentBase 的 observe() 将消息写入 memory；PlanNotebook 的计划状态本质是结构化 working memory"
+  - target: "[[tool-system]]"
+    type: depends_on
+    note: "PlanNotebook 将计划管理能力封装为 tool set（StateModule），agent 通过 tool call 驱动子任务状态机；这是'工具化状态机'模式的典型实现"
+```
+
+证据：
+- `AgentBase.observe()` 将消息写入 agent 内部 memory，是 MsgHub 广播的接收端（`_agent_base.py:469`）
+- `PlanNotebook` 继承 `StateModule`，其工具函数（`finish_subtask` / `update_subtask_state` 等）通过 tool call 机制暴露给 LLM（`_plan_notebook.py`）

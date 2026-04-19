@@ -1,0 +1,42 @@
+# L1 Patch: mcp-skills.md — SimpleMem
+
+## OP-1：在「各家对比」表中新增 SimpleMem 列
+
+在现有表格最右侧追加 SimpleMem 列：
+
+**表头**追加：`| SimpleMem |`
+
+**核心设计**行追加：
+```
+| 三层集成路径：（1）MCPToolRegistry（cross/api_mcp.py）—— 8 个 MCP tool 覆盖完整 session 生命周期（start/message/tool_use/stop/end/search/context/stats）；（2）MCP Server（MCP/ 目录）—— 独立进程，stdio 或 HTTP/SSE transport；（3）Claude Code Skill（SKILL/simplemem-skill/）—— IDE 层能力包。三层共享同一 CrossSessionOrchestrator 后端 |
+```
+
+**关键特点**行追加：
+```
+| 8 个 tool 完整覆盖 session 生命周期；_resolve_method duck-typing 支持多方法名候选，向后兼容强；_await_if_coro 同步/异步透明；_normalise_result 统一结果类型（Pydantic v1/v2/dataclass/dict 均支持）；cross_session_context tool 返回 token 预算内的 system prompt 注入文本；JSON Schema inputSchema 完整类型注解 + 详细 description |
+```
+
+**局限**行追加：
+```
+| MCP Server transport 配置文档不完整；cross_session_search tool 无 tenant_id 参数（多租户有数据泄露风险）；Claude Code Skill 仅封装 cross/ 层（文本版 SimpleMemSystem 不可通过 skill 访问）；无 tool 版本控制字段 |
+```
+
+---
+
+## OP-2：追加场景建议
+
+在「设计权衡」中追加：
+
+```markdown
+**如果你需要将记忆系统完整暴露为 MCP 工具供 IDE/agent 调用 → SimpleMem MCPToolRegistry 模式**
+8 个 tool 涵盖从会话开始到结束的完整生命周期，agent 无需自行管理状态。cross_session_context 专门为 system prompt 注入场景优化（返回 token 预算内的格式化文本 + token 计数）。工厂函数 create_mcp_tools(orchestrator) 一行完成集成，无侵入。注意：多租户部署需在 orchestrator 层配置 tenant_id，MCP tool 层无租户隔离。
+```
+
+---
+
+## OP-3：追加跨概念关系
+
+```markdown
+- SimpleMem mcp-skills → channel-remote (extends)：MCPToolRegistry 是 MCP 协议的工具层，MCP Server 是 channel-remote 的传输层，两者共同构成 MCP 集成的完整栈。SimpleMem 是目前唯一将记忆系统完整暴露为 MCP tool 集的项目，揭示了 mcp-skills 作为 memory 接入协议的设计路线。
+- SimpleMem mcp-skills → hooks (alternative)：MCPToolRegistry 的 8 工具可以作为 SessionHooks ABC 的外部触发接口，MCP client 通过调用 tool 来触发 hook 逻辑，两者是同一 orchestrator 的两种调用路径。
+```

@@ -1,0 +1,71 @@
+# L1 Patch: context-management.md
+
+**生成时间**: 2026-04-19
+**基于 L2**: `drafts/neoagent/wiki/_impl/context-management--neoagent.md`
+**目标 L1**: `wiki/context-management.md`（已存在）
+
+---
+
+## OP-1：在「各家对比」表中新增 `neoagent` 列
+
+**位置**：`wiki/context-management.md:30-34`
+
+| 行 | neoagent 单元格内容 |
+|----|---------------------|
+| 核心设计 | **双层主动策略**：(1) `ContextCompressor`（tiktoken 精确计数 + 70% 预算触发 + 结构化 5 字段模板 `GOAL/PROGRESS/DECISIONS/FILES/NEXT STEPS/KEY CONTEXT` + 前次摘要延续 + 3 次失败后永久降级 `_truncate_oldest`）；(2) **freed / recall 协议**：`BaseTool.auto_free_after: int` 让工具声明结果生命周期，`QueryLoop` 每轮维护 `tool_result_ages` 字典触发 freed 生成，`FreedToolResult(id, tool_name, size, preview, original_content)` 保留原文到 session state；`_apply_freed_to_messages` 返回消息列表副本（provider 看到 placeholder，messages 原文不变）；`_render_freed_section` 把 recoverable 清单注入 system prompt 末尾 |
+| 关键特点 | **auto_free_after 在工具协议层**：run_python `auto_free_after=2`、recall_tool_result `auto_free_after=1`（防 re-inflation）、普通工具默认 0（永不 free）——不同工具结果有差异化生命周期；**recall → 一轮可见 → 再次 auto-free** 的可重入循环：LLM 任何时候可 `recall_tool_result(id)` 拿回原文，下一轮该内容自动回到 freed 状态；freed placeholder 带结构化元数据（id/tool_name/size/preview）让 LLM 精准判断要不要 recall；`tiktoken + json.dumps(schemas)` 把工具 schema 纳入 token 估算（避免长 schema 静默吃 context） |
+| 局限 | `freed_tool_results` 字典无上限，长 session 累积到 MB 级（所有 tool result 原文都在 session JSON）；`tool_result_ages` 和 `tool_use_to_tool_name` 在 compressor 剔除旧对后成僵尸键，长 session 字典无界增长；压缩不感知 freed 语义——"[freed: ...]" 占位被摘要掉后 recoverable 语义丢失；压缩失败 3 次后永久降级截断（无冷却期重试）；`should_compress` 70% 阈值 + `_KEEP_RECENT=6` 硬编码不可配置；无多模态 token 估算（tiktoken only） |
+
+---
+
+## OP-2：在「场景决策指南」追加新场景建议
+
+**位置**：`wiki/context-management.md` 场景决策指南部分末尾
+
+### 方案 E：按工具粒度的可恢复上下文管理（neoagent freed/recall 模式）
+
+**补充到现有「方案对比」表**：
+
+| 方案 | 核心思路 | 适合场景 | 代表项目 |
+|------|---------|---------|---------|
+| 方案 E：按工具粒度的可恢复管理 | 工具协议层声明 `auto_free_after: int`，工具结果到期后自动折叠为 placeholder（带 size + preview 元数据），session state 保留原文可通过 `recall_tool_result` 一轮回放 | 长 agent 会话 + 混合工具类型（既有短命探索工具如 run_python，也有需要长期参考的工具如 read_file）| neoagent |
+
+**场景决策指南新增**：
+
+### 如果你在做长 agent 会话且工具输出差异化（部分短命部分长期） → 选方案 E（freed/recall）
+
+- **原因**：传统方案把所有历史当同质数据处理（要么全压缩、要么全 RAG、要么全保留）。实际场景里，`run_python` 做了次一次性数据清洗，结果用过就好；`read_file` 读的项目代码可能要反复参考；网页抓取结果可能看过再也不需要了。工具协议层的 `auto_free_after` 让每种工具独立控制自己的生命周期，不需要 QueryLoop 猜测——短命工具自动节约 context，长期工具永久保留，LLM 需要时 `recall_tool_result(id)` 拿回 freed 内容在当前轮查看。
+- **关键代码证据**：
+  - `neoagent/tools/base.py:14` — `auto_free_after: int = 0`（BaseTool 协议字段）
+  - `neoagent/core/loop.py:296-337` — 每轮 tool_use 分支后的 age 追踪 + auto_free 触发
+  - `neoagent/core/loop.py:347-384` — `_apply_freed_to_messages` 返回副本，provider 视图用 placeholder，messages 原文不变
+  - `neoagent/tools/builtin/recall_tool_result.py:24` — `auto_free_after = 1`（防 re-inflation 的自 free 机制）
+- **与已有源对比**：
+  - **vs Claude Code `applyToolResultBudget`**：Claude Code 是工具结果字节数上限（到阈值一刀切截断），不可恢复；neoagent freed 保留原文、可 recall。
+  - **vs Hermes Agent 三层防溢出**：Hermes 是"工具内截断 → 超长持久化到文件 → turn 预算"，是被动 + 不可再注入 context；neoagent 是协议驱动主动 + 可回放。
+  - **vs AgentScope `convert_tool_result_to_string`**：写本地文件后 context 不再见内容；neoagent 把 "可恢复" 作为一等公民。
+- **注意**：
+  - freed_tool_results 字典持有全部 original_content，session JSON 可能很大（run_python 5KB × 100 次 = 500KB），需应用层自行清理（框架无 LRU）。
+  - 压缩 + freed 叠加时：ContextCompressor 看到的是 placeholder 文本，压缩后 recoverable 语义丢失——大压缩前应 recall 掉确实需要的内容。
+  - recall 触发的输出本身也 `auto_free_after=1`，保证不会出现"永远 recall 永远膨胀"的死循环。
+
+### 如果你的工具结果字节数变化巨大（有时 100B 有时 10KB）→ 把 schema 纳入 token budget
+
+- **原因**：neoagent 的 `ContextCompressor.should_compress(msgs, schemas, budget)` 三参数设计明确把 `tools schemas` json.dumps 后的 token 纳入 budget 计算——这在 MCP 场景特别重要（几十个 MCP 工具的 schemas 轻易 2-5K token）。其他 context-management 实现往往只算 messages 忽略 tool schema，会让 MCP 重度使用的场景突然 OOM。
+- **代码证据**：`neoagent/core/compress.py:62-68` — `estimate_tools_tokens(schemas)` + `should_compress` 把 tool_tokens 加进比较。
+
+---
+
+## OP-3：无新跨概念关系
+
+context-management 与 tool-system 的关系已在 `[[tool-system]]` supports 方向的 L1 patch 中追加。本 patch 不重复。
+
+OP-3: 无新跨概念关系发现
+
+---
+
+## 摘要
+
+- OP-1：新增 neoagent 列（3 行 × 1 列）
+- OP-2：追加方案 E + 2 条场景决策建议（freed/recall + tool schema budget）
+- OP-3：无需新增

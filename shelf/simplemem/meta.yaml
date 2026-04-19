@@ -1,0 +1,48 @@
+status: complete
+source: SimpleMem
+source_path: /Users/neo/Desktop/project/git/SimpleMem
+source_version: "94ef7d76786af96878dea6e87ea2c7f5eaeae168 2026-04-03 23:50:37 -0400"
+created: "2026-04-15"
+updated: "2026-04-15"
+concepts_covered:
+  - memory-system
+  - context-management
+  - query-loop
+  - multi-agent
+  - hooks
+  - mcp-skills
+  - runtime-state
+  - evaluation-observability
+  - channel-remote
+l2_files:
+  - wiki/_impl/memory-system--SimpleMem.md
+  - wiki/_impl/context-management--SimpleMem.md
+  - wiki/_impl/query-loop--SimpleMem.md
+  - wiki/_impl/multi-agent--SimpleMem.md
+  - wiki/_impl/hooks--SimpleMem.md
+  - wiki/_impl/mcp-skills--SimpleMem.md
+  - wiki/_impl/runtime-state--SimpleMem.md
+  - wiki/_impl/evaluation-observability--SimpleMem.md
+  - wiki/_impl/channel-remote--SimpleMem.md
+l1_patches:
+  - wiki/memory-system.md.patch
+  - wiki/context-management.md.patch
+  - wiki/query-loop.md.patch
+  - wiki/multi-agent.md.patch
+  - wiki/hooks.md.patch
+  - wiki/mcp-skills.md.patch
+  - wiki/runtime-state.md.patch
+  - wiki/evaluation-observability.md.patch
+  - wiki/channel-remote.md.patch
+review_summary:
+  level_a: 0
+  level_b: 3
+  level_c: 0
+  blocked: 0
+  pending_review: 3
+coverage:
+  rate: 100
+  status: PASS
+  directories_total: 8
+  directories_covered: 8
+  remediation_rounds: 0

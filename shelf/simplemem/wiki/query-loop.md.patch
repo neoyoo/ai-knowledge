@@ -1,0 +1,50 @@
+# L1 Patch: query-loop.md — SimpleMem
+
+## OP-1：在「各家对比」表中新增 SimpleMem 列
+
+在现有表格最右侧追加 SimpleMem 列：
+
+**表头**追加：`| SimpleMem |`
+
+**核心设计**行追加：
+```
+| 专为记忆检索设计的意图感知检索规划循环（非通用 agent loop）：三层嵌套循环——（1）LLM Planning 将查询分解为 {q_sem, q_lex, q_sym, d}；（2）ThreadPoolExecutor 并行三路检索（语义/词法/符号），取并集 C_q；（3）可选 Reflection 循环（LLM 判断 C_q 充分性，不足则补充查询，硬上限 max_reflection_rounds）；最终 AnswerGenerator 从 C_q 合成答案 |
+```
+
+**关键特点**行追加：
+```
+| Planning 前置分解（一问→三路子查询）；反射式自适应深度（非固定轮次）；三路并行检索消除串行瓶颈；所有 LLM 调用强制 JSON 输出 + 3 次重试；dateparser 解析相对时间为绝对范围用于符号检索；Planning 失败时降级到原始 query 语义检索（有降级无崩溃）|
+```
+
+**局限**行追加：
+```
+| 一次 ask() 最少 2 次 LLM 调用，开启 reflection 达 4-6 次，延迟 3-10s；Planning 和 Reflection 不支持 streaming（必须等完整 JSON 返回）；Planning 失败的降级静默（无显式告警，精度下降无感知）；Reflection 轮数硬上限保守，复杂多跳问题可能不足 |
+```
+
+---
+
+## OP-2：在「设计权衡」中追加场景建议
+
+在「场景决策指南」末尾追加：
+
+```markdown
+**如果你的 agent 做记忆检索，且用户查询意图多样（时间/地点/人物/语义混杂）→ SimpleMem 意图感知检索规划**
+将单一查询分解为三路专用子查询（语义 embedding + BM25 词法 + 结构化元数据过滤），并行执行后取并集，比单一向量检索精度显著更高（LoCoMo EM +47%）。代价是每次检索至少 2 次 LLM 调用，适合对检索质量敏感、对延迟容忍度相对宽松的场景（如离线问答、异步助手）。
+```
+
+---
+
+## OP-2（补充）：在「方案对比」表中追加 SimpleMem 行
+
+```markdown
+| 方案 D：意图感知检索规划循环 | 不是通用 agent loop，而是专门的记忆检索循环：LLM 规划 → 并行三路检索 → 反射式补充 → 答案合成 | 记忆密集型 agent、需要高精度历史 QA、查询意图多样（时间/地点/语义混杂）的场景 | SimpleMem |
+```
+
+---
+
+## OP-3：追加跨概念关系
+
+```markdown
+- SimpleMem query-loop 是 memory-system 的消费端（uses）：SimpleMem 的 query loop 专为记忆检索设计，不是通用 agent loop——这揭示了 query loop 可以专用化为某个概念维度的循环，而非必须是 agent 全局主循环。
+- SimpleMem query-loop → context-management (uses)：Planning 阶段需要历史查询上下文（H），Reflection 阶段需要当前已检索内容，两者都是 context 管理的消费场景。
+```

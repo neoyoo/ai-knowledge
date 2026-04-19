@@ -1,0 +1,106 @@
+# L1 Patch: memory-system ← agentscope
+生成时间: 2026-04-15
+基于 L2: drafts/agentscope/wiki/_impl/memory-system--agentscope.md
+目标 L1: wiki/memory-system.md（已存在）
+
+---
+
+## OP-1: 新增对比表列
+
+在 L1「各家对比」表（第 28 行）的表头和数据行末尾追加 `AgentScope` 列。
+
+### 表头行修改
+
+原：
+```
+| 维度 | Claude Code | OpenHarness | DeerFlow | Hermes Agent | MemPalace |
+```
+改为：
+```
+| 维度 | Claude Code | OpenHarness | DeerFlow | Hermes Agent | MemPalace | AgentScope |
+```
+
+### 分隔行修改
+
+原：
+```
+|------|------------|-------------|----------|-------------|-----------|
+```
+改为：
+```
+|------|------------|-------------|----------|-------------|-----------|------------|
+```
+
+### 「核心设计」行末尾追加：
+
+```
+| 两层正交架构：Working Memory（`MemoryBase` 接口，4 种后端：内存/Redis/SQLAlchemy/Tablestore）+ Long-Term Memory（两条技术路线：mem0 向量语义路线 / ReMe 任务-个人-工具三分路线）；两层均继承 `StateModule` 统一序列化协议，天然适配分布式部署；LTM 以工具函数 `record_to_memory` / `retrieve_from_memory` 暴露给 LLM 自主调用 |
+```
+
+### 「关键特点」行末尾追加：
+
+```
+| Mark 标记系统：同一 memory 实例内按字符串标签做语义分区（`get_memory(mark="tool_calls")`），同一会话内多角色/多流不互相污染；Redis 实现额外维护 `marks_index`（Redis Set）避免全量 SCAN；mem0 路线三级降级写入（user → assistant → infer=False）保证内容一定落库；ReMe 路线将 LTM 拆成 Personal/Task/Tool 三个独立实例，各自专属 prompt flow；`StateModule` 序列化使 memory 状态可跨进程持久化 |
+```
+
+### 「局限」行末尾追加：
+
+```
+| 两层记忆无自动联动，框架不提供「超过 N 轮自动压缩写 LTM」机制，开发者须手动串联；`_compressed_summary` 字段仅为预留槽位，无内置触发器/LLM 调用/版本管理；ReMe 路线对 DashScope/OpenAI 强绑定，其他 LLM provider 直接报错；RAG 模块与 memory 完全正交无融合接口；`delete_by_mark` 未在基类声明为抽象方法，某些后端静默缺失；mem0 存在版本兼容硬编码分支（`mem0ai <= 0.1.115`）|
+```
+
+---
+
+## OP-2: 场景决策补充
+
+在 L1「场景决策指南」末尾（「**如果你在做个人长期助手，要求零云依赖…」之后）追加以下两条：
+
+---
+
+**如果你在做 multi-agent 系统，需要在同一会话内对不同 agent/角色隔离上下文 → Mark 标记系统（AgentScope 模式）**
+
+大多数记忆系统只有「全量历史」或「按会话隔离」两档。AgentScope 的 mark 系统提供了第三档：同一 memory 实例内的语义分区——给工具调用历史打 `tool_calls` mark，给规划步骤打 `planning` mark，不同 agent 调用 `get_memory(mark=...)` 精确取出所需子集，而不是每次传入完整历史（代码证据：`InMemoryMemory` 内部存 `list[tuple[Msg, list[str]]]`，`RedisMemory` 额外维护 `marks_index` Set 避免全量扫描）。代价是 mark 体系需要开发者自行设计和维护，mark 名称无类型约束，多人开发时容易命名漂移。与 Hermes Agent 的「单 provider 约束」不同，这里的隔离是在同一后端内做细粒度分区，而非切换后端。
+
+**如果你需要长期记忆但诉求各不相同（个人偏好 / 任务经验 / 工具使用习惯）→ 记忆三分法（AgentScope ReMe 路线）**
+
+将 LTM 拆成三个独立实例（`ReMePersonalLongTermMemory` / `ReMeTaskLongTermMemory` / `ReMeToolLongTermMemory`），每个子类有专属的 prompt flow 和 `record_to_memory` docstring 直接作为 LLM 工具的 description——这承认了不同类型记忆的检索策略本质不同：个人偏好需要语义相似，任务经验需要结构化步骤检索，工具指南需要基于工具名称精确匹配。与 MemPalace 的 raw verbatim 单一存储相比，三分法的代价是需要维护三个实例、且对 DashScope/OpenAI 强绑定（其他 LLM provider 直接抛 `ValueError`）。适合：已使用 AgentScope 框架且以 DashScope/OpenAI 为主要 LLM provider、需要精细化长期记忆分类的生产场景。
+
+---
+
+在 L1「记忆生命周期管理」表格（第 83 行，`| 策略 | 做法 | 代表 | 适合 |` 表）末尾追加一行：
+
+```
+| 无自动维护 + 滑动 TTL 过期 | Redis 后端支持 `key_ttl` 参数，每次读写后调用 `_refresh_session_ttl` 刷新全部 session 相关 Key 的 TTL（滑动窗口，非固定过期）；两层记忆均无自动剪枝，但 Working Memory 可通过 TTL 实现自然淘汰 | AgentScope RedisMemory | 需要 Redis 作为 session 存储、对话稀疏（希望闲置会话自动清理）、但不需要跨 session 持久化的场景 |
+```
+
+---
+
+## OP-3: 跨概念关系
+
+在 L1 frontmatter `relations:` 块末尾追加：
+
+```yaml
+  - target: "[[tool-system]]"
+    type: depends_on
+    evidence: "AgentScope LTM 的 record_to_memory / retrieve_from_memory 以工具函数形式暴露，LLM 通过工具调用自主管理长期记忆；记忆能力与工具系统深度耦合，LTM 本质是一组特殊工具"
+  - target: "[[multi-agent]]"
+    type: supports
+    evidence: "AgentScope Mark 系统允许同一 memory 实例服务多个 agent/角色，通过 mark 过滤隔离各自上下文，为 multi-agent 编排中的工具链与主对话流分离提供了轻量原语"
+```
+
+同时在 L1 frontmatter `sources:` 列表追加 `agentscope`：
+
+原：
+```yaml
+sources: [claude-code, openharness, deer-flow, hermes-agent, mempalace]
+```
+改为：
+```yaml
+sources: [claude-code, openharness, deer-flow, hermes-agent, mempalace, agentscope]
+```
+
+并在 L1「L2 详情」章节末尾追加：
+
+```
+- [[memory-system--agentscope]]
+```

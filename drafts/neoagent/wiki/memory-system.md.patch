@@ -1,0 +1,59 @@
+# L1 Patch: memory-system.md
+
+**生成时间**: 2026-04-19
+**基于 L2**: `drafts/neoagent/wiki/_impl/memory-system--neoagent.md`
+**目标 L1**: `wiki/memory-system.md`（已存在）
+
+---
+
+## OP-1：在「各家对比」表中新增 `neoagent` 列
+
+**位置**：`wiki/memory-system.md:34-38`
+
+| 行 | neoagent 单元格内容 |
+|----|---------------------|
+| 核心设计 | 文件夹即数据库（4 文件 340 行）：`MemoryStore` = 目录 + `MEMORY.md` 索引 + 多个 `{topic}.md` 主题文件；`MemoryExtractor` 在 QueryLoop 每 end_turn 后触发（两阈值 OR：`tool_calls >= 5` 或 `token_delta >= 4000`），LLM 输出 JSON 数组 `[{filename, description, content}, ...]`，校验 kebab-case + 写盘 + 重建索引；`MemoryRetriever` 用 lexical 评分（query 分词 vs description 子串命中计数）取 top-5 主题；无 embedding / SQLite / 向量库 |
+| 关键特点 | **刻意保持"记忆 = markdown 文件夹"的可审阅性**：用户可 `cat`/`vim` 直接编辑记忆文件，下次 `build_prompt_section` 自动读取（lambda content）；**项目级默认路径**：`hash(cwd)[:8]` 自然跨 session 共享、跨项目隔离；**两阈值 OR 触发 + baseline reset**：成功抽取后 `memory_token_baseline = current_tokens` 防止同一批对话被重复触发；提取 prompt 显式约束 "Only extract information that is stable across sessions" — prompt engineering 做护栏；查询可选的 retrieve（`query=None` 只给索引，让 agent 自己决定要不要深入查；`query="..."` 给 top-5 内容） |
+| 局限 | Lexical 检索弱（"用户偏好" vs "user preferences" 无法匹配），无同义词/向量；新主题覆盖旧主题（`write_topic = path.write_text`），提取 prompt 不知道已有主题可能重名覆盖；无 TTL / 过期清理（只增不减）；检索每文件 2000 字符硬截断（语义完整性风险）；无跨项目记忆合并；`MemoryExtractEvent.filenames = ()` 未填充（`loop.py:249` 注释 "filenames not populated yet"）——Observer 知道"存了 N 条"不知道"哪些文件"；`MemoryManager.maybe_extract` 无 session_state 时永远 no-op（强耦合 Session）；索引重建 O(N × file_size)（每次扫所有文件读第一行） |
+
+---
+
+## OP-2：在「场景决策指南」追加新场景建议
+
+**位置**：`wiki/memory-system.md` 场景决策指南部分末尾
+
+### 如果你需要用户手动编辑记忆（CLI 工具、开发者助手场景）→ 选 "文件夹即数据库"（neoagent / OpenHarness 路线）
+
+- **原因**：大多数专业记忆系统（mem0、ChromaDB、Zep）对用户是黑盒——存了什么、能不能删、怎么改都不直观。对"开发者长期工作助手"类场景，**可审阅、可 git diff、可手动修正** 比检索精度更重要。neoagent 把记忆做成普通 markdown 文件夹，用户在 `~/.neoagent/memory/{project-hash}/` 直接 `vim` 编辑；下一轮 agent 自动读取（因为 memory section 是 lambda content）。
+- **代码证据**：
+  - `neoagent/memory/store.py:50-52` — `write_topic` 纯粹 `path.write_text`，无数据库层
+  - `neoagent/memory/retriever.py:38-42` — lexical 评分实现 28 行
+  - `neoagent/agent.py:188-195` — 默认路径 `~/.neoagent/memory/{hash(cwd)[:8]}` 项目隔离
+- **与已有源对比**：
+  - **vs mem0 / AgentScope ReMe 向量路线**：向量检索精度高但对用户黑盒，新增/修改记忆需走专用 API；neoagent 直接编辑文件。
+  - **vs OpenHarness**（同路线）：OpenHarness 也是 markdown 文件夹（同忠实移植 Claude Code 记忆模式）但无自动触发机制（需显式调用）；neoagent 增加了 QueryLoop 的自动触发（5 tool calls or 4K token delta）——兼顾人工可控 + 自动提取。
+- **注意**：
+  - 只适合单机 + 单用户场景；多用户/多进程部署时文件写入可能竞态（neoagent 未加 file lock）。
+  - 无 embedding 意味着跨语言或同义表达的查询会 miss；若用户主要语言是英文或中文单一，够用；若混合使用须手动规范 description 用词。
+  - 提取 prompt 不拿到已有索引，可能重复写同一主题覆盖旧内容——改进方案：在提取 prompt 里注入当前索引让 LLM 判断是 append / replace / skip。
+
+### 如果你的 agent 需要长期学习项目上下文（数周-数月）→ 项目级 hash 路径 + lambda content
+
+- **原因**：长期助手最大痛点是 "这是哪个项目？" 的隐式上下文。neoagent 用 `hash(cwd)[:8]` 作为 memory 目录——同一工作目录永远映射同一记忆库，切换项目（切换 cwd）自动切记忆库。`lambda content=memory_manager.build_prompt_section()` 让记忆更新立即在下一轮 prompt 反映，无需重启 agent。
+- **代码证据**：`neoagent/agent.py:188-195` — 默认 `hash(cwd)` 路径；`agent.py:197-204` — lambda content PromptSection。
+
+---
+
+## OP-3：无新跨概念关系
+
+memory-system 与 context-management、tool-system、runtime-state 的现有关系在 neoagent 中完全印证，无新类型发现。
+
+OP-3: 无新跨概念关系发现
+
+---
+
+## 摘要
+
+- OP-1：新增 neoagent 列（3 行 × 1 列）
+- OP-2：追加 2 条场景建议（可编辑 markdown 路线 + 项目级 hash 路径）
+- OP-3：无需新增

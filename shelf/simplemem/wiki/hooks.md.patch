@@ -1,0 +1,42 @@
+# L1 Patch: hooks.md — SimpleMem
+
+## OP-1：在「各家对比」表中新增 SimpleMem 列
+
+在现有表格最右侧追加 SimpleMem 列：
+
+**表头**追加：`| SimpleMem |`
+
+**核心设计**行追加：
+```
+| SessionHooks 抽象基类（ABC），定义 6 个 async 生命周期方法：on_session_start / on_user_message / on_assistant_message / on_tool_use / on_session_stop / on_session_end。on_session_start 触发 ContextInjector 构建历史 context 并返回 ContextBundle；on_session_stop 触发 ObservationExtractor（LLM 提取结构化观察）+ 会话摘要生成 + 双存储持久化，返回 FinalizationReport |
+```
+
+**关键特点**行追加：
+```
+| 纯 ABC 无框架依赖，任何 agent 框架实现 6 个方法即可集成；HookResult 统一返回类型（context_bundle / finalization_report / events_recorded）；EventKind 枚举（message/tool_use/file_change/note/system）使 ObservationExtractor 做类型感知提取；RedactionLevel（none/partial/full）三级脱敏控制；EventCollector 写后缓冲批量 flush；_await_if_coro 同步/异步透明适配 |
+```
+
+**局限**行追加：
+```
+| 全部 async 方法，同步框架集成需 event loop；on_session_stop 触发 LLM 调用（observation 提取），若 session 事件量大耗时可能超框架 hook 超时；无 hook 链式注册（只能注册一个实现）；on_file_change 事件类型存在但 SessionHooks 未暴露对应方法 |
+```
+
+---
+
+## OP-2：追加场景建议
+
+在「设计权衡」中追加：
+
+```markdown
+**如果你需要 agent session 生命周期钩子同时承担记忆持久化职责 → SimpleMem SessionHooks 模式**
+与其他项目的 hooks 主要用于日志/监控不同，SimpleMem 的 hooks 是记忆系统的主入口——每个 hook 调用都有明确的记忆操作语义（start=注入历史, message/tool_use=记录事件, stop=提炼持久化）。FinalizationReport 使 hook 结果可量化监控。代价是 stop hook 有 LLM 调用延迟，高频短会话场景成本不可控。
+```
+
+---
+
+## OP-3：追加跨概念关系
+
+```markdown
+- SimpleMem hooks → memory-system (feeds)：每个 hook 调用最终都写入 memory-system 层，hooks 是 memory 的数据入口，揭示了 hooks 和 memory 之间的强耦合设计路线（与其他项目 hooks 独立于 memory 的设计相比）。
+- SimpleMem hooks → multi-agent (alternative)：SimpleMem 不通过 multi-agent 框架协调多 session，而是通过 hooks 的 on_session_start/stop 隐式实现跨 session 协调，是 hooks 作为 multi-agent 替代方案的一个实例。
+```

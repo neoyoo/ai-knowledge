@@ -1,0 +1,48 @@
+# L1 Patch: context-management.md — SimpleMem
+
+## OP-1：在「各家对比」表中新增 SimpleMem 列
+
+在现有表格（Claude Code / OpenHarness / DeerFlow / Hermes Agent 四列）最右侧追加 SimpleMem 列：
+
+**表头**追加：`| SimpleMem |`
+
+**核心设计**行追加：
+```
+| 双层 context 管控：（1）写入侧——MemoryBuilder 将对话窗口压缩为单句无歧义的 lossless_restatement，比原始对话短 3-5x，压缩即注入优化；（2）跨会话注入侧——ContextInjector token 预算管控，从 SQLite 取摘要 + LanceDB 语义匹配，按 token 上限截断后组装 ContextBundle 注入 system prompt |
+```
+
+**关键特点**行追加：
+```
+| 三类 context 分层注入（session_summaries / observations / semantic_matches）；token_budget 硬截止上限；ContextBundle.total_tokens 估算字段；lossless_restatement 强制消歧（禁代词/相对时间）确保注入内容可被模型准确理解；overlap 滑动窗口保证跨窗口语义连续性 |
+```
+
+**局限**行追加：
+```
+| token 估算用字符数/4 近似，对中文/代码误差大；文本版 SimpleMemSystem 无 ContextInjector（跨会话注入仅 cross/ 层可用）；overlap 导致同一对话可能生成内容相近的多个 lossless_restatement，检索噪声增加；压缩质量完全依赖 LLM 能力 |
+```
+
+---
+
+## OP-2：在「方案对比」表中追加 SimpleMem 行
+
+在「方案 D：混合策略」行后追加：
+
+```markdown
+| 方案 E：压缩即注入优化（SimpleMem 模式）| 写入时 LLM 强制压缩为无歧义单句（lossless_restatement），token 占用比原文短 3-5x；跨会话按 token 预算三层注入（摘要/观察/语义匹配），context 始终在预算内 | 对话质量要求高、需要精确跨会话记忆注入、context window 受限的场景 | SimpleMem |
+```
+
+在「场景决策指南」末尾追加：
+
+```markdown
+**如果你需要将历史对话精确无歧义地注入新会话 → SimpleMem 压缩注入模式**
+lossless_restatement 在写入阶段就消除了指代歧义，注入时无需再做二次处理。ContextInjector 的三层结构（摘要提供全局理解 + 观察提供结构化事实 + 语义匹配提供具体细节）比单一 RAG 注入信噪比更高。注意：此方案的 token 估算精度依赖字符数近似，中文项目需考虑误差。
+```
+
+---
+
+## OP-3：追加跨概念关系
+
+```markdown
+- SimpleMem context-management → memory-system (uses)：ContextInjector 从 memory-system 层（SQLite + LanceDB）拉取数据，context 管理是 memory 系统的消费端。
+- SimpleMem context-management 揭示新模式：「写入压缩 → 注入优化」的协同设计，与其他项目的「先存储再检索」解耦设计形成对比——SimpleMem 将存储格式设计为面向注入优化，两个阶段共享一个设计目标。
+```

@@ -1,0 +1,67 @@
+# L1 Patch: query-loop.md
+
+**生成时间**: 2026-04-19
+**基于 L2**: `drafts/neoagent/wiki/_impl/query-loop--neoagent.md`
+**目标 L1**: `wiki/query-loop.md`（已存在）
+
+---
+
+## OP-1：在「各家对比」表中新增 `neoagent` 列
+
+**位置**：`wiki/query-loop.md:32-36` 的 `| 维度 | Claude Code | OpenHarness | DeerFlow | Hermes Agent | AgentScope |` 表
+
+**操作**：追加 `neoagent` 列
+
+| 行 | neoagent 单元格内容 |
+|----|---------------------|
+| 核心设计 | `QueryLoop.run()` 单循环，融合 7 类横切（压缩检查、deferred MCP 过滤、freed tool-result 重写、pre/post provider hook、memory 抽取、per-turn auto-save、auto_free_after 衰老追踪）；Session 为一等公民（非 `list[Message]`），`SessionState` 跨轮持久化；max_tokens 自动重试翻倍后仍截断则作 end_turn 退出避免 corrupt tool_calls；ContextVar 把 session 传给 builtin 工具（`tool_search`、`free_tool_result`、`recall_tool_result`），FastAPI 并发请求天然隔离 |
+| 关键特点 | `BaseTool.auto_free_after: int` 协议层字段 + `tool_result_ages` 字典逐轮 +1：工具自己声明"我的结果 N 轮后应被 free"；freed 后 provider 视图用 `[freed: id=..., tool=..., size=..., preview=...]` placeholder 替换 ToolResultBlock 但 messages 原文保留（提供 recall 可能）；`_render_freed_section` 把 recoverable 清单作为 "## Freed Tool Results" 段追加到 system prompt 末尾，让 LLM 知道"哪些结果可以 recall 回来"；pre_provider_call hook 的 deny 直接生成 "[Hook denied]" assistant message 退出循环 |
+| 局限 | 循环体已近 300 行，新增横切需在固定顺序里找插入点（`auto_free` 必须在 tool_result append 之后），扩展性不如中间件式架构；`tool_result_ages` 和 `tool_use_to_tool_name` 字典在 compressor 剔除旧 tool 对后变成僵尸键，长 session 无界增长；无中断 checkpoint（只能通过 asyncio task cancel 整体取消，无 handle_interrupt 语义化响应）；压缩失败达 3 次后永久降级截断，无冷却期恢复 LLM 压缩路径 |
+
+---
+
+## OP-2：在「场景决策指南」追加新场景建议
+
+**位置**：`wiki/query-loop.md` 的 `### 场景决策指南` 部分末尾
+
+**追加内容**：
+
+### 如果你在做需要 tool 结果细粒度生命周期的 agent（编程助手、研究型 agent）→ neoagent 的 freed/recall 模式
+
+- **原因**：传统循环的上下文管理只有"整体压缩"这一刀——所有历史被 LLM 摘要掉，细节丢失不可恢复。neoagent 把"何时忘记"做成工具协议层（`BaseTool.auto_free_after: int`），让 run_python（声明 `auto_free_after=2`）的临时输出过 2 轮自动折叠，但完整原文保留在 session state，LLM 可通过 `recall_tool_result(id)` 在任意时机拿回来"当前轮查看"——recall 自己也声明 `auto_free_after=1`，保证不会重入膨胀。效果：长 agent 会话的 context 稳定低，但过往信息按需精准召回。
+- **代码证据**：
+  - `neoagent/tools/base.py:14` — `auto_free_after: int = 0` 字段定义
+  - `neoagent/core/loop.py:296-337` — 每轮 tool_use 分支后的 age 追踪与 auto_free 触发
+  - `neoagent/core/loop.py:347-397` — `_apply_freed_to_messages` 生成 provider 视图副本 + `_render_freed_section` 把 recoverable 清单作为 system prompt 段
+  - `neoagent/tools/builtin/recall_tool_result.py:24` — `auto_free_after = 1` 防 re-inflation 注释
+- **与已有源对比**：Claude Code 的 `applyToolResultBudget` 是工具结果字节数上限（一刀切截断），Hermes Agent 的三层防溢出是"截断 → 持久化文件 → turn 预算"（不可恢复），AgentScope `convert_tool_result_to_string` 直接写本地文件（分布式不可移植）。neoagent 是**唯一把"可恢复"做成一等公民**的方案：freed placeholder 带 size/preview 元数据 + recall 工具 + auto_free_after 协议字段，形成完整可重入循环。
+
+### 如果你在做 FastAPI 或 Web 后端部署 agent → ContextVar 基础设施是必要的
+
+- **原因**：传统 agent 框架把 session 绑在 instance attribute（`self._current_session`）上，单进程多 asyncio task 并发调同一 agent 时会互相覆盖。neoagent 用 `ContextVar` 传递 session state 到 builtin 工具（`tool_search.py` 里的 `_current_session_state` / `_current_session`），每个 asyncio task 继承独立 snapshot，天然并发安全。
+- **代码证据**：`neoagent/tools/builtin/tool_search.py:19-36` 注释明写 `replaces instance attribute ... to avoid race conditions in concurrent FastAPI requests`；`neoagent/core/loop.py:87-93` 在 run() 开头 `set_session_state(session_state)` 和 `set_current_session(_session)`。
+- **与已有源对比**：多数同类项目未显式解决 web 并发问题；AgentScope 的 class 级 hook 有"多实例共享 OrderedDict"的 bug（见 hooks L1 已记录），neoagent 的 ContextVar 路径主动避开了这个陷阱。
+
+---
+
+## OP-3：跨概念关系（可选）
+
+`neoagent` 的 query-loop 揭示一条新关系：**query-loop → context-management 的 depends_on 在协议层**——通过 `BaseTool.auto_free_after` 字段和 `SessionState.freed_tool_results`/`recalled_this_turn`/`tool_result_ages` 三个字段，query-loop 的主循环直接操作 context-management 的数据结构。这比其他项目"上下文管理作为独立中间件或压缩函数"的 loose coupling 更深——**工具声明的生命周期参数直接影响每轮循环的字典状态变迁**。
+
+建议在 query-loop.md 的 `relations` frontmatter 添加：
+
+```yaml
+  - target: "[[context-management]]"
+    type: depends_on
+    evidence: "neoagent 的 QueryLoop.run() 每轮维护 session_state.tool_result_ages 字典并根据 BaseTool.auto_free_after 字段触发 freed tool result 生成；上下文管理从传统的'超阈值触发压缩'演化为'工具协议驱动的细粒度生命周期'，query-loop 直接操作 context-management 的数据结构而非通过中间件抽象"
+```
+
+（该 relation 类型已存在但 evidence 可追加 neoagent 实证）
+
+---
+
+## 摘要
+
+- OP-1：新增 neoagent 列（3 行 × 1 列）
+- OP-2：追加 2 条场景决策建议（freed/recall 模式 + ContextVar 并发安全）
+- OP-3：追加 query-loop → context-management 关系 evidence（现有 relation 不变，evidence 增强）

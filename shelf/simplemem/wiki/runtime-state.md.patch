@@ -1,0 +1,42 @@
+# L1 Patch: runtime-state.md — SimpleMem
+
+## OP-1：在「各家对比」表中新增 SimpleMem 列
+
+在现有表格最右侧追加 SimpleMem 列：
+
+**表头**追加：`| SimpleMem |`
+
+**核心设计**行追加：
+```
+| 双层状态架构：（1）in-process 状态——MemoryBuilder.dialogue_buffer（对话缓冲）+ previous_entries（去重上下文），纯内存，与进程同寿；（2）持久化状态——SQLite（SessionRecord/SessionEvent/CrossObservation/SessionSummary 结构化 metadata）+ LanceDB（CrossObservation embedding 向量），双存储互补。通过 Pydantic 模型（cross/types.py）统一定义所有状态类型，SessionStatus 状态机管理会话生命周期 |
+```
+
+**关键特点**行追加：
+```
+| SessionStatus 状态机（pending→active→stopped→ended）防止乱序调用；EventCollector 写后缓冲（内存 buffer → session_stop 时批量 flush）；ContextBundle runtime-only（不持久化，每次 session_start 动态计算，确保最新）；importance 字段为 consolidation decay 铺路；threading.Lock 保护并发 _active_sessions dict；soft-delete 保留记忆演化历史 |
+```
+
+**局限**行追加：
+```
+| SQLite check_same_thread=False 高并发写入有锁竞争；in-process _active_sessions 进程重启即丢失所有 active session（持久化仅 stopped 及之后）；LanceDB 无分区，全 tenant 共一表，大规模语义搜索 recall 随数据量下降；MemoryBuilder.dialogue_buffer 无 WAL，崩溃丢失缓冲数据 |
+```
+
+---
+
+## OP-2：追加场景建议
+
+在「设计权衡」中追加：
+
+```markdown
+**如果你需要 agent 状态跨 session 持久化，且需要语义检索历史状态 → SimpleMem 双存储 Runtime State 模式**
+SQLite 处理结构化精确查询（会话 ID、时间范围、类型过滤），LanceDB 处理语义模糊搜索，两者配合实现精确+语义双通道查询。EventCollector 写后缓冲避免每条消息都触发 I/O。注意：进程重启会丢失 active session 状态，需要外部重启恢复机制（如 Kubernetes 健康检查 + 优雅关闭钩子）。
+```
+
+---
+
+## OP-3：追加跨概念关系
+
+```markdown
+- SimpleMem runtime-state → session-recovery (lacks)：SimpleMem 无显式 checkpoint/fault-tolerance 机制，active session 状态仅在内存中，进程崩溃后 active 状态不可恢复——这是与 session-recovery 概念的显著差距，提示生产部署需要外部恢复机制。
+- SimpleMem runtime-state 的 ContextBundle 揭示：runtime state 可以包含「动态构建的注入上下文」而非只是简单的配置或计数器——runtime state 是 context management 和 memory system 之间的桥接层。
+```

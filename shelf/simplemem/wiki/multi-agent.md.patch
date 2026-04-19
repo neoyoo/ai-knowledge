@@ -1,0 +1,43 @@
+# L1 Patch: multi-agent.md — SimpleMem
+
+## OP-1：在「各家对比」表中新增 SimpleMem 列
+
+在现有表格最右侧追加 SimpleMem 列：
+
+**表头**追加：`| SimpleMem |`
+
+**核心设计**行追加：
+```
+| 非通用 multi-agent 框架，而是专为「记忆跨 agent 共享」设计的 CrossSessionOrchestrator：管理多 tenant/多 session 的记忆生命周期（start→record→stop→end），session stop 时 LLM 提取结构化 CrossObservation（6 种类型：decision/bugfix/feature/refactor/discovery/change），持久化到 SQLite + LanceDB 双存储，供下一个 agent session 通过 ContextInjector 获取 |
+```
+
+**关键特点**行追加：
+```
+| ObservationType 分类（6 种）使跨 agent 记忆可按类型过滤检索；threading.Lock 保护并发 session 状态；ConsolidationWorker 后台维护记忆质量（decay+merge+prune，全部 soft-delete）；duck-typed orchestrator 接口（_resolve_method 查找候选方法名）；双存储互补（SQLite 精确 + LanceDB 语义）|
+```
+
+**局限**行追加：
+```
+| 无真正的 agent 间通信/协商/任务分发机制，只能做记忆共享；ConsolidationWorker 需外部调度，orchestrator 无自动触发；租户隔离仅 cross/ 层有，文本版 SimpleMemSystem 无 tenant 概念；OmniSimpleMem orchestrator 多模态编排逻辑复杂且文档薄弱 |
+```
+
+---
+
+## OP-2：追加场景建议
+
+在「场景决策指南」末尾追加：
+
+```markdown
+**如果你需要多个 agent session 共享结构化历史记忆（而非对话历史）→ SimpleMem CrossSessionOrchestrator**
+与其他 multi-agent 框架不同，SimpleMem 不做任务分发，而是专注于「每个 session 结束后提炼 observations，下一个 session 开始时注入相关历史」这条链路。ObservationType 分类使检索精准（"给我看所有 bugfix observations"）。适合：coding agent、个人助手、需要 session 间知识积累的长期项目。
+```
+
+---
+
+## OP-3：追加跨概念关系
+
+```markdown
+- SimpleMem multi-agent → hooks (uses)：CrossSessionOrchestrator 通过 SessionHooks ABC 集成到 agent 框架，multi-agent 的记忆协调依赖 hooks 扩展点。
+- SimpleMem multi-agent → runtime-state (uses)：_active_sessions Dict + threading.Lock 是 multi-agent 并发状态管理的核心容器。
+- SimpleMem 揭示：multi-agent 的价值不只在任务协作，也在知识积累——多 session 的 CrossObservation 积累形成结构化知识库，是 multi-agent 的记忆维度价值。
+```

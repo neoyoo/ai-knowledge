@@ -1,0 +1,42 @@
+# L1 Patch: channel-remote.md — SimpleMem
+
+## OP-1：在「各家对比」表中新增 SimpleMem 列
+
+在现有表格最右侧追加 SimpleMem 列：
+
+**表头**追加：`| SimpleMem |`
+
+**核心设计**行追加：
+```
+| 双协议双渠道：（1）HTTP REST（cross/api_http.py）—— FastAPI 实现，7 个端点覆盖 session 生命周期 + 搜索 + 健康检查，可作为独立服务或通过 create_cross_router() 挂载到现有 FastAPI 应用；（2）MCP 协议（MCP/ + cross/api_mcp.py）—— 独立 MCP server，stdio 或 HTTP/SSE transport，8 个 MCP tool。两种渠道共享同一 CrossSessionOrchestrator 后端，Docker Compose 一键部署 |
+```
+
+**关键特点**行追加：
+```
+| create_cross_router() 可挂载到现有 FastAPI（零侵入集成）；Pydantic 请求/响应模型完整类型安全；CORS 开放策略 + frontend/ 预留 Web UI 路径；Docker Compose 容器化一键启动；StartSessionResponse 返回 context_tokens 估算（调用方可感知注入量）；两种协议对同一功能无重复实现 |
+```
+
+**局限**行追加：
+```
+| HTTP API 无认证中间件（需 API Gateway 层补充）；MCP server 无连接复用（重连后 _active_sessions 丢失）；HTTP /search 无分页（top_k 上限 100）；MCP server transport 配置文档不完整 |
+```
+
+---
+
+## OP-2：追加场景建议
+
+在「设计权衡」中追加：
+
+```markdown
+**如果你需要将记忆服务同时暴露给 HTTP 客户端和 MCP 客户端 → SimpleMem 双协议模式**
+create_cross_router 可挂载到现有 FastAPI，无需独立进程；MCP server 支持 Claude Desktop/Cursor 等 IDE 接入；两种协议共享 orchestrator，逻辑不重复。注意：生产部署必须在 API Gateway 层添加认证（HTTP API 无内建认证）。
+```
+
+---
+
+## OP-3：追加跨概念关系
+
+```markdown
+- SimpleMem channel-remote → mcp-skills (extends)：SimpleMem 的 channel-remote 实现（MCP Server）是 mcp-skills 的 transport 层，两者构成 MCP 集成的完整栈。SimpleMem 揭示：channel-remote 和 mcp-skills 在记忆系统场景下高度耦合，难以独立设计。
+- SimpleMem channel-remote 的双协议架构提示：agent 框架的远程渠道应与业务逻辑完全解耦（两种协议共享同一 orchestrator），渠道只是入口，不应承载状态。
+```

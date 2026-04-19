@@ -64,8 +64,8 @@ neoagent/
 ```python
 @dataclass
 class Message:
-    role: Literal["user", "assistant", "system", "tool_result"]
-    content: str | list[ContentBlock]
+    role: Literal["user", "assistant"]  # Anthropic API 标准角色
+    content: str | list[ContentBlock]   # ContentBlock 包含 text / tool_use / tool_result
 
 @dataclass
 class ToolCall:
@@ -81,7 +81,8 @@ class ToolResult:
 
 @dataclass
 class Turn:
-    messages: list[Message]
+    """一轮交互：模型响应 + 工具执行结果"""
+    response: Message              # assistant 消息（可能包含 tool_use blocks）
     tool_calls: list[ToolCall]
     tool_results: list[ToolResult]
     stop_reason: Literal["end_turn", "tool_use", "max_tokens"]
@@ -110,11 +111,12 @@ class QueryLoop:
         tool_registry: ToolRegistry,
         prompt_builder: PromptBuilder,
         max_turns: int = 30,              # KB: 必须有硬上限
-        context_budget: int = 0,          # 0 = 自动从 provider 获取
+        context_budget: int = 0,          # 0 = 通过 provider.get_context_window() 获取
         on_turn: Callable | None = None,  # 轻量回调，可观测每轮
     ): ...
 
     async def run(self, messages: list[Message]) -> ConversationResult:
+        turns: list[Turn] = []
         for turn_idx in range(self.max_turns):
             # 0. 检查 token 预算，超限则压缩
             if self._estimate_tokens(messages) > self.context_budget * 0.7:
@@ -250,7 +252,7 @@ class PermissionChecker:
 | Glob | 文件操作 |
 | Grep | 搜索 |
 | Bash | 执行 |
-| Agent | 子代理（可选，v1 可后置） |
+| Agent | 子代理（v2，依赖 Multi-Agent 设计） |
 
 ### 关键设计点
 
@@ -324,6 +326,11 @@ v1 只做 Anthropic Claude API 适配，薄封装：
 class Provider(ABC):
     @abstractmethod
     async def create(self, system: str, messages: list, tools: list) -> Response: ...
+    
+    @abstractmethod
+    def get_context_window(self) -> int:
+        """返回模型的 context window 大小（tokens），用于压缩触发判断"""
+        ...
 
 class AnthropicProvider(Provider):
     def __init__(self, api_key: str, model: str = "claude-sonnet-4-20250514"):

@@ -1,0 +1,69 @@
+# L1 Patch: evaluation-observability ← agentscope
+生成时间: 2026-04-15
+基于 L2: drafts/agentscope/wiki/_impl/evaluation-observability--agentscope.md
+目标 L1: wiki/evaluation-observability.md（已存在）
+
+---
+
+## OP-1: 新增对比表列
+
+**插入位置**：在 L1「各家对比」表中，在 `Hermes Agent` 列之后新增 `AgentScope` 列。
+
+需同时更新：
+1. 表头行：`| 维度 | Claude Code | OpenHarness | DeerFlow | Hermes Agent |` → 追加 `AgentScope |`
+2. 各内容行：在每行末尾 `|` 前追加对应 AgentScope 单元格内容
+
+**新增列内容（按维度）**：
+
+| 维度 | AgentScope |
+|------|-----------|
+| 核心设计 | OTel 标准 + 内置评估管道的双模块设计：`tracing/` 通过五类专用装饰器（`trace_reply`/`trace_llm`/`trace_toolkit`/`trace_embedding`/`trace_format`）为 Agent/LLM/Tool/Embedding/Formatter 各调用层注入 span，全部遵循 OpenTelemetry GenAI Semantic Conventions；`evaluate/` 提供 Benchmark-Task-Metric-Evaluator-Storage 五层评估管道，通过 `_InMemoryExporter` + OTel Baggage 把运行时追踪数据自动桥接为评测指标统计，实现"评测时自动采集 token/工具调用次数"的闭环；支持 GeneralEvaluator（串行）和 RayEvaluator（Ray 并发）两种评测执行模式 |
+| 关键特点 | OTel 标准属性 + `agentscope.*` 扩展双层命名，trace 数据无需适配层即可接入 Jaeger/Grafana/Langfuse；`_InMemoryExporter` 既可连外部 OTLP 后端（生产观测），又可在评测时切换为内存导出（指标统计），同一套 tracing 基础设施两用；`FileEvaluatorStorage` 在每次执行前检查已有结果文件，天然支持断点续评；ACEBenchmark 内置中文手机 Agent 工具调用基准（ACEAccuracy 最终状态 + ACEProcessAccuracy 里程碑路径），支持过程准确率（trajectory 级别）而非只看最终结果；流式 LLM 响应通过 generator wrapper 在最后一个 chunk 后才写 span 属性，保持 span 完整性 |
+| 局限 | `finish_reason` 硬编码为 `"stop"`（有 FIXME 注释），不反映实际 `tool_use`/`length` 等终止原因；`_InMemoryExporter` 依赖 Baggage 上下文，多线程环境下传播失败时统计数据静默丢弃；GeneralEvaluator 串行执行 Metric，多指标场景效率低（需 Ray 依赖才能并行）；ACEBenchmark 仅支持中文数据集，英文版本注释未启用；tracing 装饰器主要覆盖 async 路径，同步自定义模型需手动添加 |
+
+---
+
+## OP-2: 场景决策补充
+
+**在 L1「场景决策指南」末尾追加以下内容**（插入位置：「研究 / 模型比较」段落之后，「常见陷阱」章节之前）：
+
+---
+
+**生产级 Agent 框架 / 需要标准 APM 接入** → 优先选 OpenTelemetry 标准化追踪。如果团队已有 Jaeger/Grafana/Langfuse 等 APM 基础设施，用 OTel 标准装饰器（如 AgentScope 的 `@trace_llm`/`@trace_reply`）而非自研事件格式，可以零适配层直接接入。关键是属性命名遵循 GenAI Semantic Conventions（`gen_ai.operation.name`、`gen_ai.usage.input_tokens` 等），框架特有信息用独立命名空间（如 `agentscope.*`）追加，不污染标准字段。代码证据：`agentscope/tracing/_attributes.py` 复用 `opentelemetry-semantic-conventions` 的 `gen_ai_attributes`，仅在框架特有属性加 `agentscope.*` 前缀。对比：OpenHarness 的 `stream-json` 事件格式是私有协议，需要额外适配层才能接入标准 APM 工具。
+
+**大规模评测 / Benchmark 管道需要成本归因** → 把 tracing 层和评测层通过共享上下文打通（而非在 solution 代码中手动埋点）。AgentScope 的 `_InMemoryExporter` + OTel Baggage 模式展示了这种设计：评测框架在执行每个任务时注入 `task_id/repeat_id` 到 Baggage，tracing 层自动把 span 统计路由到对应的任务桶，评测结束后直接获得"该任务消耗了多少 token/调用了多少工具"，无需 solution 代码关心。这在跑大型 benchmark（数百 task × 多次重复）时特别有价值，人工统计既麻烦又容易出错。
+
+**需要支持中断后续评的评测管道** → 在存储层做幂等检查，而非依赖外部锁或状态机。`FileEvaluatorStorage.solution_result_exists()` 在每次 `run_solution` 前检查 `solution.json` 是否已存在，已存在则跳过，这使得评测脚本可以随时 Ctrl+C 再重新运行，不浪费已完成的 API 调用。对比 Hermes BatchRunner 的类似思路（三道质量门禁过滤后生成 trajectory 文件），两者都是"写文件即完成标记"的幂等设计。
+
+---
+
+**「常见陷阱」补充新条目**（在现有陷阱列表末尾追加）：
+
+**只看最终结果，忽视过程准确率**：对工具调用型 agent，"最终状态正确"和"推理路径合理"是两个独立维度。agent 可能通过错误的工具调用序列碰巧得到正确答案（或者因路径冗余浪费多轮调用）。ACEProcessAccuracy 的设计揭示了这个问题：需要检查 trajectory 中是否包含所有必要的里程碑调用，而不只是比对最终输出。在设计自定义 Metric 时，建议同时定义最终状态指标和过程路径指标两类。
+
+**评测统计依赖 Baggage 上下文传播，多线程下容易静默失败**：如果用 OTel Baggage 传递评测上下文（task_id/repeat_id），需要确保 Baggage 在异步/多线程边界正确传播。AgentScope 的 `_InMemoryExporter` 遇到 Baggage 读取失败时静默丢弃统计数据（`if task_id is None or repeat_id is None: continue`），这会导致部分任务的 token/工具统计缺失，而不会报错。在并发评测框架中，每个 worker 需要显式绑定 Baggage 上下文，不能依赖自动传播。
+
+---
+
+## OP-3: 跨概念关系
+
+在 L1 frontmatter `relations` 字段中追加以下关系（或在「L2 详情」上方新增「关系」章节补充）：
+
+```yaml
+# 追加到 frontmatter relations 列表
+- target: "[[tool-system]]"
+  type: depends_on
+  evidence: "AgentScope trace_toolkit 装饰器在 Toolkit.call_tool_function() 注入 span，过程准确率（ProcessAccuracy）检查 trajectory 中的 ToolUseBlock 序列；工具系统的可观测性直接决定了评估精度"
+  source: agentscope
+
+- target: "[[prompt-system]]"
+  type: depends_on
+  evidence: "AgentScope trace_format 装饰器追踪 FormatterBase.__call__() 的格式化行为（format target、输出消息数），Formatter 层的可见性是理解 LLM 输入构造开销的必要前提"
+  source: agentscope
+```
+
+**同时在「L2 详情」末尾追加**：
+
+```
+- [[evaluation-observability--agentscope]]
+```

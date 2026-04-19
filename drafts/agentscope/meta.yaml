@@ -1,0 +1,51 @@
+source_name: "agentscope"
+source_path: "/Users/neo/Desktop/project/git/agentscope"
+source_version: "0ff492c3508e532d2a33234dfe4a299833ce866c 2026-04-12"
+ingest_time: "2026-04-15T00:00:00Z"
+kb_path: "/Users/neo/Desktop/project/git/ai- knowledge"
+concepts_covered:
+  - query-loop
+  - prompt-system
+  - memory-system
+  - context-management
+  - runtime-state
+  - session-recovery
+  - hooks
+  - mcp-skills
+  - tool-system
+  - multi-agent
+  - channel-remote
+  - evaluation-observability
+coverage_rate: 0.905
+l2_files:
+  - wiki/_impl/query-loop--agentscope.md
+  - wiki/_impl/prompt-system--agentscope.md
+  - wiki/_impl/memory-system--agentscope.md
+  - wiki/_impl/context-management--agentscope.md
+  - wiki/_impl/runtime-state--agentscope.md
+  - wiki/_impl/session-recovery--agentscope.md
+  - wiki/_impl/hooks--agentscope.md
+  - wiki/_impl/mcp-skills--agentscope.md
+  - wiki/_impl/tool-system--agentscope.md
+  - wiki/_impl/multi-agent--agentscope.md
+  - wiki/_impl/channel-remote--agentscope.md
+  - wiki/_impl/evaluation-observability--agentscope.md
+l1_patches:
+  - wiki/query-loop.md.patch
+  - wiki/prompt-system.md.patch
+  - wiki/memory-system.md.patch
+  - wiki/context-management.md.patch
+  - wiki/runtime-state.md.patch
+  - wiki/session-recovery.md.patch
+  - wiki/hooks.md.patch
+  - wiki/mcp-skills.md.patch
+  - wiki/tool-system.md.patch
+  - wiki/multi-agent.md.patch
+  - wiki/channel-remote.md.patch
+  - wiki/evaluation-observability.md.patch
+status: ready-to-merge
+review_summary:
+  auto_fixed: 2
+  pending_review: 0
+  blocked: 0
+notes: "tune/tuner modules have no matching ontology concept - unique finetuning capability, evaluate post-ingest"

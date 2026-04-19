@@ -66,6 +66,12 @@ concepts:
     aliases: [评估, observability, metrics, tracing]
     definition: 效果评估 + 运行可观测
 
+  - id: finetuning-system
+    title: Finetuning System
+    aliases: [微调, finetuning, training pipeline, RL, SFT, DPO, GRPO, prompt optimization]
+    definition: Agent/LLM 微调与训练管道——支持 SFT/DPO/GRPO 等算法及 prompt 自动优化
+    note: "2026-04-15 由 AgentScope tuner/ 模块分析发现，升为第 13 个 L1 概念"
+
 # --- Relation Types ---
 relations:
   - id: uses
@@ -97,6 +103,16 @@ relations:
     label: A 给 B 加了新能力
     description: 扩展
     example: MCP 扩展 Tool System
+
+  - id: depends_on
+    label: A 依赖 B
+    description: 依赖关系，A 依赖 B 才能工作
+    example: Query Loop 依赖 Tool System
+
+  - id: supports
+    label: A 为 B 提供基础能力
+    description: 支撑关系，A 为 B 提供基础能力
+    example: Context Management 支撑 Prompt System
 
 # --- Extension Rules ---
 extension:

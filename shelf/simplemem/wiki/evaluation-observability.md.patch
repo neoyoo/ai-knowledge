@@ -1,0 +1,45 @@
+# L1 Patch: evaluation-observability.md — SimpleMem
+
+## OP-1：在「各家对比」表中新增 SimpleMem 列
+
+在现有表格最右侧追加 SimpleMem 列：
+
+**表头**追加：`| SimpleMem |`
+
+**核心设计**行追加：
+```
+| 两套互补机制：（1）离线精度评估——OmniSimpleMem/omni_memory/evaluation/ 的 MemoryEvaluator，支持 Exact Match/F1/Hit Rate@K/Latency P50/P95，集成 LoCoMo 基准（test_locomo10.py），记录 EM +47%/F1 +51% vs Mem0；（2）在线行为可观测——cross/collectors.py 的 ObservationExtractor，从 session events LLM 提取 6 类 CrossObservation（decision/bugfix/feature/refactor/discovery/change），跨 session 累积结构化行为记录；stats MCP tool 暴露系统级指标 |
+```
+
+**关键特点**行追加：
+```
+| LoCoMo 权威基准可外部验证；ObservationType 6 分类使行为统计按类型分析（非扁平日志）；MemoryEvaluator 记录 P50/P95 延迟分位数；cross_session_stats MCP tool 可供 agent 轮询健康监控；评估框架嵌入 OmniSimpleMem 层，开箱即用 |
+```
+
+**局限**行追加：
+```
+| 文本版 SimpleMemSystem 无内建 metrics（只有 print 语句）；ObservationExtractor 提取质量无自评估机制；评估框架仅在 OmniSimpleMem 层，文本版需手动运行 test_locomo10.py；无 OpenTelemetry/Jaeger 分布式追踪，无法追踪 planning/retrieval/reflection 各阶段耗时 |
+```
+
+---
+
+## OP-2：追加场景建议
+
+在「设计权衡」中追加：
+
+```markdown
+**如果你需要对记忆系统的检索精度做基准验证 → SimpleMem LoCoMo 评估框架**
+MemoryEvaluator 提供端到端评估（写入→检索→对比 ground truth），LoCoMo 多会话对话数据集是记忆系统精度评估的标准基准。P50/P95 延迟记录帮助识别长尾问题。注意：评估框架仅在 OmniSimpleMem 层，文本版需自行调用 test_locomo10.py 脚本。
+
+**如果你需要跨 session 追踪 agent 行为模式（"做了哪些决策/修复了哪些 bug"）→ SimpleMem ObservationExtractor 模式**
+6 类 ObservationType 将原始事件流转化为结构化知识，比原始日志更易分析。适合需要 agent 自我审计、复盘分析的场景。
+```
+
+---
+
+## OP-3：追加跨概念关系
+
+```markdown
+- SimpleMem evaluation-observability → memory-system (uses)：LoCoMo 评估直接测量 memory-system 的检索精度，是目前 L1 页面中首个将 evaluation 与 memory 紧密绑定的实例，揭示「memory 系统必须配套专项评估框架」的设计模式。
+- SimpleMem ObservationExtractor 揭示：observability 不只是 metrics/tracing，还可以是「从行为流中提炼结构化知识」——这是 evaluation-observability 概念的一个新维度，介于可观测性和记忆系统之间。
+```

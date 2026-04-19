@@ -3,13 +3,19 @@ title: Multi-Agent
 aliases: [多智能体, multi-agent orchestration, task delegation]
 category: L1
 created: 2026-04-06
-updated: 2026-04-08
+updated: 2026-04-15
 relations:
   - target: "[[query-loop]]"
     type: uses
   - target: "[[runtime-state]]"
     type: uses
-sources: [claude-code, openharness, mirofish, deer-flow, hermes-agent]
+  - target: "[[memory-system]]"
+    type: depends_on
+    note: "MsgHub 广播依赖 AgentBase 的 observe() 将消息写入 memory；PlanNotebook 的计划状态本质是结构化 working memory"
+  - target: "[[tool-system]]"
+    type: depends_on
+    note: "PlanNotebook 将计划管理能力封装为 tool set（StateModule），agent 通过 tool call 驱动子任务状态机；这是'工具化状态机'模式的典型实现"
+sources: [claude-code, openharness, mirofish, deer-flow, hermes-agent, agentscope]
 ---
 
 ## 一句话定义

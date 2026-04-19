@@ -1,0 +1,69 @@
+# L1 Patch: session-recovery.md
+
+**生成时间**: 2026-04-19
+**基于 L2**: `drafts/neoagent/wiki/_impl/session-recovery--neoagent.md`
+**目标 L1**: `wiki/session-recovery.md`（已存在）
+
+---
+
+## OP-1：在「各家对比」表中新增 `neoagent` 列
+
+**位置**：`wiki/session-recovery.md:33-37`
+
+| 行 | neoagent 单元格内容 |
+|----|---------------------|
+| 核心设计 | `Session` + `SessionState` 双数据类 + `SessionStorage` Protocol + `JsonFileStorage` 内置实现（`session.py` 258 行）；**per-turn auto-save**：`QueryLoop` 每轮 end_turn 和 tool_use 分支末尾各调 `_session.save_if_storage()`，无 storage 绑定时 no-op；**`Session.fork()` 深拷贝所有状态**（messages / state / metadata）生成新 session，**不 bind_storage**（防止污染父）；**resume validate with warnings**：`NeoAgent.resume(session_id, validate=True)` 校验 workspace_path 存在 + updated_at 是否 stale（>24h），发射 `SessionResumeWarningEvent` 但不抛错 |
+| 关键特点 | **0o600 文件权限**（`os.open` with `O_WRONLY|O_CREAT|O_TRUNC, 0o600`）：user-only，防 group/other 读取 session 含敏感对话；**路径逃逸检查**（`is_relative_to(base_dir.resolve())`）防 `session_id="../../etc/passwd"` 攻击；**`cleanup(max_age_days=30, max_sessions=100)`** 双维度淘汰保证磁盘不无限增长；**完整 SessionState 持久化**（11 字段含 freed_tool_results 的原文 + tool_use_to_tool_name + tool_result_ages）——resume 后 LLM 可 `recall_tool_result` 拿回 crash 前的工具结果；**`Storage Protocol` `@runtime_checkable`** 让自定义 Redis/S3 后端可以 `isinstance` 校验 |
+| 局限 | 无 file lock / 无数据库事务：多进程同时 save 同一 id 最后写赢，数据损坏风险；JSON 文件可能很大（freed_tool_results 存所有原文，长 run_python 输出积累到 MB 级，无压缩）；workspace 校验只看 path 存在与否，不 diff 文件内容（agent 读过的文件可能已改变但 state 里缓存原貌）；`_session_from_dict` 无 schema 版本号，字段新增后旧 JSON 部分丢失静默；fork 不复制 `_storage` 字段但文档未强调，用户调 save_if_storage 无效会困惑；`SessionStorage` Protocol 缺 `exists(session_id)`，检查必须 try/except KeyError |
+
+---
+
+## OP-2：在「场景决策指南」追加新场景建议
+
+**位置**：`wiki/session-recovery.md` 场景决策指南部分末尾
+
+### 如果你需要零配置持久化 + 无 storage 时零成本降级 → `save_if_storage` 模式（neoagent）
+
+- **原因**：典型 session 持久化实现要求"有 storage 就保存，无 storage 就 skip"——业务层必须到处写 `if storage: save(session)`，污染主循环。neoagent 把这逻辑封装到 `Session.save_if_storage()`：
+  ```python
+  def save_if_storage(self):
+      storage = object.__getattribute__(self, "_storage")
+      if storage is not None:
+          self.save(storage)
+  ```
+  `QueryLoop` 无条件调用，安全性由 Session 自身保证——"可选持久化"从业务概念降格为数据类的内置行为。
+- **代码证据**：
+  - `neoagent/session.py:76-85` — `save_if_storage` + `bind_storage` 实现
+  - `neoagent/core/loop.py:259, 339` — QueryLoop 无条件调用
+  - `neoagent/agent.py:128-146` — `chat(session)` 里 `if not _temp: session.bind_storage(storage)` 唯一配置点
+- **与已有源对比**：OpenHarness 每个 user turn 末 JSON 快照；Hermes 有 SessionResetPolicy 配置层；DeerFlow 委托 LangGraph checkpointer。这些都要求调用方知道"现在要不要保存"。neoagent 的模式让调用方只管"要不要持久化这 session"（一次性决定），QueryLoop 不知道也不关心——单一职责更清。
+
+### 如果你需要"可观测的恢复问题"但不想 crash → SessionResumeWarningEvent 模式
+
+- **原因**：session recovery 的常见棘手问题（workspace 不存在、session 太旧、provider 已变）在大多数框架是 "要么无感 recover 要么抛错 crash"——缺中间态。neoagent 的 `_validate_resume` 发射 `SessionResumeWarningEvent(session_id, reason, details)` 到 EventBus，但不抛错——让应用层自己决定"要不要用"。典型场景：
+  - CLI agent：warning 打到 console，user 确认继续或丢弃
+  - Web service：warning 转为 HTTP header（`X-Resume-Warning: workspace_missing`），客户端 UI 提示
+- **代码证据**：`neoagent/agent.py:106-126` — `_validate_resume` 双校验（workspace_path / stale_session）+ event emit；`neoagent/events.py:129-134` — `SessionResumeWarningEvent`。
+- **注意**：`reason` 是字符串而非 enum，扩展方便但缺类型检查——将来加新 reason 时调用方要手动处理未知 reason。
+
+### 如果你需要 Session fork（A/B 测试 / 探索分支 / replay） → Session.fork() + 不自动 bind_storage
+
+- **原因**：想试"如果 agent 当时选 A 工具而不是 B 会怎样？"的场景，fork 当前 session 作为探索分支是最干净的——不污染原 session 的持久化。neoagent 的 `fork()` 深拷贝 messages + state + metadata，但**不复制 `_storage`**——fork 默认脱离持久化，需要调用方显式 `bind_storage` 才加入 save_if_storage 循环。
+- **代码证据**：`neoagent/session.py:86-95` — `fork()` 实现（无 `_storage` 字段）。
+- **注意**：fork session 里的 `created_at / updated_at` 重置为 now，`id` 是新 UUID——时间序列分析不能混用 fork/original。
+
+---
+
+## OP-3：无新跨概念关系
+
+session-recovery 的现有 `uses [[runtime-state]]`、`extends [[query-loop]]`、`depends_on [[tool-system]]`、`depends_on [[memory-system]]` 在 neoagent 中完全印证。
+
+OP-3: 无新跨概念关系发现
+
+---
+
+## 摘要
+
+- OP-1：新增 neoagent 列（3 行 × 1 列）
+- OP-2：追加 3 条场景决策建议（save_if_storage 模式 + SessionResumeWarningEvent + Session.fork）
+- OP-3：无需新增

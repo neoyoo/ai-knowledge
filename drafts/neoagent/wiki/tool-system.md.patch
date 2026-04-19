@@ -1,0 +1,68 @@
+# L1 Patch: tool-system.md
+
+**生成时间**: 2026-04-19
+**基于 L2**: `drafts/neoagent/wiki/_impl/tool-system--neoagent.md`
+**目标 L1**: `wiki/tool-system.md`（已存在）
+
+---
+
+## OP-1：在「各家对比」表中新增 `neoagent` 列
+
+**位置**：`wiki/tool-system.md:34-38`
+
+| 行 | neoagent 单元格内容 |
+|----|---------------------|
+| 核心设计 | 4 组件解耦：`BaseTool`（抽象协议层）→ `ToolRegistry`（31 行纯数据结构）→ `ToolExecutor`（执行层，管权限/并发/截断/hook/事件）→ `DeferredToolRegistry`（MCP 专用延迟索引）；**`BaseTool.auto_free_after: int` 字段**把上下文生命周期管理降到工具协议层——工具自己声明结果 N 轮后被 free；ToolRegistry 的 `get_schemas()` 过滤 `permission="deny"`（deny 工具连 schema 都不暴露给 LLM，vs Claude Code "暴露但拒绝"） |
+| 关键特点 | **pre_tool_call hook 后的二次权限检查**（`executor.py:112-124` 注释明写"hooks must not bypass PermissionChecker"）——防 hook modify 把安全 input 改成危险 input 绕过权限；并发分区 `asyncio.gather` safe 组并行 + unsafe 组串行，结果用 idx 回填保证顺序；内置 13 个工具含 `run_python`（沙盒含 env 白名单仅 9 键 + `killpg` 超时 + `start_new_session=True`）；`tool_search` 只返回 name+description，full schema 下一轮才通过 `get_schemas()` 对 LLM 可见——强制"search 之后等下一轮"的 handshake；**learned skill 绕过 allowed 白名单**：`write_skill` 写到 `skills_dir/learned/`，下次 `skill_load.list_skills()` 无条件包含，agent 自我成长闭环 |
+| 局限 | 只有声明式 concurrent-safe，没有路径级判定（两个 `is_concurrent_safe=False` 的工具永远串行，哪怕操作不同文件）；`max_result_size=50000` 全局配置无 tool 级覆盖；`tool_schema` 生成只 `pop("title")` 不处理 `$ref`/`oneOf`/`anyOf`——legacy provider 可能报错；ContextVar 传递 session 绑在 `tools.builtin.tool_search` 模块——未来把 builtin tools 拆独立包时 free/recall/tool_search 三工具物理耦合；无工具依赖图/组合工具（AgentScope ToolGroup / Hermes Toolset 没有） |
+
+---
+
+## OP-2：在「场景决策指南」追加新场景建议
+
+**位置**：`wiki/tool-system.md` 的场景决策指南部分末尾
+
+### 如果你需要工具主动管理自身输出的上下文生命周期 → BaseTool.auto_free_after 模式（neoagent）
+
+- **原因**：传统工具协议只声明输入参数和输出类型，不表达"我的结果应该存活多久"——QueryLoop 只能被动按阈值压缩所有历史。neoagent 把 `auto_free_after: int = 0`（0 = 永不）写进 `BaseTool` 协议，让工具开发者自己决策：
+  - `run_python`（临时数据分析）声明 `auto_free_after=2`（2 轮后被 free，节约 context）
+  - `recall_tool_result` 声明 `auto_free_after=1`（防止 recall 内容永久 re-inflation）
+  - 普通 MCP 调用默认 0（永不 free）
+- **代码证据**：
+  - `neoagent/tools/base.py:14` — `auto_free_after: int = 0`
+  - `neoagent/tools/builtin/run_python.py:72` — `auto_free_after: int = 2`
+  - `neoagent/tools/builtin/recall_tool_result.py:24` — `auto_free_after = 1` + 注释 "recall output auto-frees next turn to avoid permanent re-inflation"
+  - `neoagent/core/loop.py:296-337` — QueryLoop 每轮 tool_use 分支后的 age 追踪
+- **与已有源对比**：AgentScope 的 `convert_tool_result_to_string` 是框架级一刀切截断阈值，Hermes 的三层防溢出是"大小/数量"维度的被动控制，Claude Code 的 `applyToolResultBudget` 工具结果字节预算——没有一个把**"工具自己声明结果生命周期"**做成协议级一等公民。这一设计让多样化工具（短命的 run_python / 永久的 read_file）有差异化处理而无需改 loop 代码。
+- **注意**：auto_free 是"折叠"不是"删除"——`original_content` 仍留在 session state 供 `recall_tool_result` 恢复；session JSON 可能因此很大，若 freed 工具结果积累达 MB 级需要应用层自行清理。
+
+### 如果你需要 agent 自我扩展能力（learn new skill → reuse）→ learned/ 目录 + white-list 绕过模式
+
+- **原因**：agent 任务中经常遇到"第一次是探索，之后同类任务应直接复用"——neoagent 的 `WriteSkillTool` 把 agent 写到 `skills_dir/learned/{kebab-name}/SKILL.md`，而 `SkillLoadTool.list_skills` 对 `learned/` 下的 skill **无条件包含**（绕过外部 `allowed` 白名单）。下一轮 agent 启动时，LLM 自动看到自己写的 skill 并可调用。
+- **代码证据**：
+  - `neoagent/tools/builtin/write_skill.py:81-95` — 写到 `learned_dir / skill_name / SKILL.md`
+  - `neoagent/tools/builtin/skill_load.py:99-103` — `is_learned = path.parts[-2] != skills_dir.name and "learned" in path.parts`；`if not is_learned and allowed ... not in allowed: continue`
+- **与已有源对比**：DeerFlow 的 `skill_manage` 支持 agent 创建新 skill 但没有白名单绕过设计；Hermes Skills Hub 是中心化 + 信任分级模型需要外部审批。neoagent 的设计信任"agent 自己写的 skill 默认安全"，形成最短自进化闭环——代价是 agent 写错 skill 永远污染库（无 sunset / 质量评审机制）。
+- **注意**：`write_skill` 有 kebab-case 校验（`^[a-z0-9]+(-[a-z0-9]+)*$`）和隔离目录（只能写 `learned_dir`，不能覆盖用户预定义 skill），但内容本身无审核。生产部署若不希望 agent 自扩展，构造 SkillLoadTool 时不注册 WriteSkillTool 即可。
+
+---
+
+## OP-3：新跨概念关系
+
+neoagent 揭示了一条现有 wiki 未记录的关系：**tool-system 与 context-management 在协议层耦合**（`BaseTool.auto_free_after` 字段直接驱动 `SessionState.freed_tool_results`）。
+
+建议在 `wiki/tool-system.md` 的 `relations` frontmatter 追加：
+
+```yaml
+  - target: "[[context-management]]"
+    type: supports
+    evidence: "neoagent 在 BaseTool 协议层添加 auto_free_after: int 字段，使工具声明自己的结果生命周期；QueryLoop 每轮维护 tool_result_ages 字典触发 freed placeholder 替换。工具系统直接支撑 context-management 的细粒度生命周期管理，而非通过中间件解耦——这是'工具协议即上下文策略声明'的新思路"
+```
+
+---
+
+## 摘要
+
+- OP-1：新增 neoagent 列（3 行 × 1 列）
+- OP-2：追加 2 条场景建议（auto_free_after 协议模式 + learned/ 自扩展）
+- OP-3：新增 tool-system supports context-management 关系（evidence 来自 neoagent）

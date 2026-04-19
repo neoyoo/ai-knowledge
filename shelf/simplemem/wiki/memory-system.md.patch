@@ -1,0 +1,50 @@
+# L1 Patch: memory-system.md — SimpleMem
+
+## OP-1：在「各家对比」表中新增 SimpleMem 列
+
+在现有表格最右侧追加 SimpleMem 列（表头和所有行）：
+
+**表头**追加：`| SimpleMem |`
+
+**核心设计**行追加：
+```
+| 三阶段管道：语义结构化压缩（Stage 1）+ 在线语义合成（Stage 2）+ 意图感知检索规划（Stage 3）。写入时 LLM 将对话窗口压缩为「无损重述」(lossless_restatement)——单句无歧义表达；检索时 LLM 规划三路并行查询（语义/词法/符号），可选反射式补充检索。两个版本：轻量文本版（core/）和多模态版（OmniSimpleMem/），通过 Registry 路由器统一接入 |
+```
+
+**关键特点**行追加：
+```
+| 强制消歧 prompt（禁止代词和相对时间，强制绝对时间+完整主谓宾）；三视图并行检索（ThreadPoolExecutor）+ 反射式循环（LLM 判断充分性）；Registry 路由器惰性加载多后端；cross/ 层提供跨会话 context 注入（ContextInjector token 预算管控）+ MCP 8 工具接口；OmniSimpleMem 支持 text/image/audio/video；LoCoMo 基准 EM +47%/F1 +51%（vs Mem0）|
+```
+
+**局限**行追加：
+```
+| 写入和检索均需多次 LLM 调用，延迟高（单次 ask 最少 2 次 LLM 调用，开启 reflection 达 4-6 次）；文本版无记忆淘汰策略（只增不减）；并行处理的 previous_entries 共享状态存在时序一致性问题；两个版本（文本/多模态）接口不对称，无法互换 |
+```
+
+---
+
+## OP-2：在「设计权衡」中追加场景决策建议
+
+在「场景决策指南」末尾追加：
+
+```markdown
+**如果你在做对话质量要求高的长期记忆 agent，需要高精度 QA → SimpleMem 模式（三阶段管道）**
+强制消歧的 lossless_restatement 解决了跨会话指代不清的根本问题。三视图并行检索 + 意图规划让检索精度显著高于单一 vector search（LoCoMo EM +47%）。代价是每次写入和查询都消耗 LLM tokens，不适合低延迟或高频写入场景。适合：对话质量敏感的个人助手、需要精确时间/地点/人物查询的场景。
+```
+
+---
+
+## OP-2（补充）：在「记忆生命周期管理」表中追加 SimpleMem 行
+
+```markdown
+| SimpleMem Consolidation | Decay（时间衰减重要性）+ Merge（合并近重复，similarity > 0.95）+ Prune（软删除低重要性记忆）+ 全部 soft-delete 保留可审计历史 | SimpleMem cross/ 层 | 需要自动质量维护、有长期运行需求的生产 agent |
+```
+
+---
+
+## OP-3：追加跨概念关系
+
+```markdown
+- SimpleMem memory-system → context-management (feeds)：lossless_restatement 的压缩输出直接作为 ContextInjector 的注入素材，memory 质量决定 context 注入效果。
+- SimpleMem memory-system → evaluation-observability (uses)：OmniSimpleMem 内建 MemoryEvaluator，LoCoMo 基准验证 memory 精度，形成 memory→eval 的闭环。
+```

@@ -1,0 +1,51 @@
+# L1 Patch: prompt-system.md
+
+**生成时间**: 2026-04-19
+**基于 L2**: `drafts/neoagent/wiki/_impl/prompt-system--neoagent.md`
+**目标 L1**: `wiki/prompt-system.md`（已存在）
+
+---
+
+## OP-1：在「各家对比」表中新增 `neoagent` 列
+
+**位置**：`wiki/prompt-system.md:33-37` 的表
+
+| 行 | neoagent 单元格内容 |
+|----|---------------------|
+| 核心设计 | `PromptBuilder`（57 行）= 纯有序容器 + 三态 skill 管理器：`add_section`/`remove_section` 管常驻段，`register_skill`/`activate_skill`/`deactivate_skill` 三步流程支持运行时动态开关 skill；`build()` 按 `(is_static, priority)` 两级稳定排序；真正的动态段不在 builder 内——`QueryLoop.run()` 每轮把 `<deferred-tools>` 和 `## Freed Tool Results` 两段按 session 状态追加到 `build()` 返回值末尾，实现"builder 管声明式常驻段 + loop 管每轮动态段"的职责划分 |
+| 关键特点 | **三态 skill 流转**（registered / active / deactivated）：比单态 skill 机制多一层"已登记但未激活"的中间态，LLM 可按需激活；lambda content 延迟计算（`content=lambda: memory_manager.build_prompt_section()`），memory section 每次 build 时重新读 MEMORY.md 索引，自然支持"会话中写入新记忆 → 下一轮 prompt 自动反映"；`is_static=False` 动态段永远置后（不需要手动调优 priority 保证"身份段置顶"约束）；**循环级段与 builder 段分离**：`<deferred-tools>` 列表和 freed section 不进 builder 而是在 loop 里拼接——保持 builder 纯无状态渲染器属性 |
+| 局限 | `SkillChangeEvent` 已定义但未发射（`events.py:89-96` 注释 TODO v3.2）——skill 生命周期目前无法被观测或拦截；`PromptBuilder.__init__` 未持有 EventBus 引用，事件接入阻塞在这里；无段级 token 预算，memory section 或大量 deferred tools 列表可能悄悄膨胀 system prompt 到数 KB；`add_section` 的段名唯一性检查是 O(n)（实际段数 < 10，不算真问题）；`activate_skill` 只追加到 sections 末尾，无 insert-at-position 接口（需要高 priority 的 skill 会卡在 memory 之后） |
+
+---
+
+## OP-2：在「场景决策指南」追加新场景建议
+
+**位置**：`wiki/prompt-system.md` 的场景决策指南部分末尾
+
+### 如果你需要 LLM 自主开关 prompt 段（按任务阶段激活/停用不同指令）→ 三态 skill 管理（neoagent 模式）
+
+- **原因**：传统做法要么是"所有 skill 指令始终在 system prompt 中"（浪费 token），要么是"通过 tool_load 把 skill 内容作为 tool result 返回一次性使用"（无法持续影响后续推理）。neoagent 把 skill 做成三态（registered = 已登记但未活跃、active = 参与 build、deactivated = 从 active 列表移除但仍 registered），LLM 可在会话过程中按任务阶段激活/停用具体 skill 段——既不浪费初始 token，又能影响多轮推理。
+- **代码证据**：`neoagent/core/prompt.py:25-43` — `register_skill` / `activate_skill` / `deactivate_skill` / `is_skill_active` 四方法；`neoagent/agent.py:197-204` — `enable_memory()` 里用 lambda content 的 PromptSection 示范延迟计算。
+- **与已有源对比**：Claude Code 的 six-layer system prompt 只能全量静态；DeerFlow 的 skill 懒加载把 skill 作为 tool result 返回一次性使用；AgentScope 的 `reset_equipped_tools` 是元工具级的 tool group 切换，粒度在工具不在 prompt 段。neoagent 的三态 skill 是目前分析的源中**唯一把"prompt 段"做成可 LLM 自主开关对象**的方案。
+- **注意**：当前 QueryLoop 不自动调 activate_skill——应用代码要在 `skill_load` 工具返回后手动包成 PromptSection 并 register + activate；框架只提供机制，不强制策略。
+
+### 如果你在构建 FastAPI 或有并发需求的 agent 服务 → 动态段放 QueryLoop 级而非 PromptBuilder 级
+
+- **原因**：`PromptBuilder` 是 process-level 共享对象（agent 实例一个），如果 deferred tool 清单或 freed 段放 builder 里，并发请求会互相污染。neoagent 的做法是把这两种"每请求 session 变化"的段放到 `QueryLoop.run()` 内部逐轮拼接到 `build()` 返回值末尾——builder 保持纯静态，loop 从 session state 取 per-request 状态。
+- **代码证据**：`neoagent/core/loop.py:123-169` — deferred-tools 段和 freed section 在 loop 内部按 session state 拼接，不经过 PromptBuilder。
+
+---
+
+## OP-3：无新跨概念关系
+
+`neoagent` 的 prompt-system 与现有概念关系匹配良好（`uses [[query-loop]]` 已存在、`uses [[context-management]]` 已存在、`depends_on [[tool-system]]` 已存在）。不新增关系。
+
+OP-3: 无新跨概念关系发现
+
+---
+
+## 摘要
+
+- OP-1：新增 neoagent 列（3 行 × 1 列）
+- OP-2：追加 2 条场景决策建议（三态 skill 管理 + 循环级动态段）
+- OP-3：无需新增
