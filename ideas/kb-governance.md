@@ -17,7 +17,7 @@ updated: 2026-04-19
 
 **核心想法**：当前 `shelf/` 规则一刀切："项目不成熟 → 全部不进 wiki"。但**项目成熟度 ≠ 其中单点设计的创新度**。shelf 里可能埋着神器 pattern。需要一条通道：项目留 shelf，但其中独立设计能单独提到 `wiki/_insights/` 或 `wiki/_patterns/`。
 
-**为什么值得**：neoagent 已验证——`auto_free_after` 被手工搬进 `wiki/_patterns/`，没这条通道就被埋没；simplemem 也做过类似提升（`wiki/_insights/simplemem--dual-storage.md`），说明需求真实只是没规范化。
+**为什么值得**：neoagent 已验证——原 `auto_free_after` 协议（已于 2026-04-20 移除）被手工搬进 `wiki/_patterns/`，没这条通道就被埋没；simplemem 也做过类似提升（`wiki/_insights/simplemem--dual-storage.md`），说明需求真实只是没规范化。
 
 **落地**：
 1. `schema/ingest-strategies.yaml` 加"shelf 提升规则"——shelf 时必须在 `SHELF.md` 列"候选提升项"

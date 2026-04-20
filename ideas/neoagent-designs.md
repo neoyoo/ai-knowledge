@@ -9,7 +9,7 @@ updated: 2026-04-19
 从 `shelf/neoagent/SHELF.md` 列出的"候选提升项"中摘录，等待升级到 `wiki/_insights/` 或 `wiki/_patterns/`。
 
 已升级（不在此列）：
-- `auto_free_after` 协议驱动的 freed/recall 循环 → `wiki/_patterns/tool-metadata-driven-context-lifecycle.md`
+- ~~`auto_free_after` 协议驱动的 freed/recall 循环~~ (deprecated 2026-04-20) → `wiki/_patterns/tool-metadata-driven-context-lifecycle.md` (v2 replaced with MANDATORY_CONTEXT_RULES + WORKING_MEMORY + global compression + LLM-visible free/recall tools)
 
 ---
 

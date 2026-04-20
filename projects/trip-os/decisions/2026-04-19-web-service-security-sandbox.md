@@ -67,7 +67,7 @@ trip-os 要从命令行本地工具升级为对外 Web 服务，外部用户通�
 - [[sandbox-isolation]] 威胁模型分层：T3 必须内核级隔离，Docker 单独不够
 - [[sandbox-isolation]] gVisor 专题：性能足够（syscall 密集型慢 2-5x，CPU-bound 几乎无感）、OCI 无缝
 - 2026-04-19 subagent 调研报告：agentscope-runtime 1.1.4 已 PyPI 发布、支持 `CONTAINER_DEPLOYMENT=docker/gvisor/k8s` 环境变量切换、最小集成两行代码（`BaseSandbox()` context manager）
-- `wiki/_patterns/tool-metadata-driven-context-lifecycle` 协议保留：run_python 仍有 `auto_free_after`，和沙箱底座换皮无关
+- `wiki/_patterns/tool-metadata-driven-context-lifecycle` 协议演进：`auto_free_after` 协议字段已于 2026-04-20 移除，沙箱底座换皮无关，但工具生命周期管理现通过 MANDATORY_CONTEXT_RULES + WORKING_MEMORY + 全局压缩 + LLM 可见 free/recall 工具实现
 
 ## 未知风险 / 待验证
 
@@ -82,5 +82,5 @@ trip-os 要从命令行本地工具升级为对外 Web 服务，外部用户通�
 
 - P1.0（30 分钟）：本地 colima + docker + pull agentscope runtime base image，跑通 BaseSandbox 最小 demo
 - P1.1（2 小时）：实测上面未知风险 1-3，写到 `projects/trip-os/open-questions/`
-- P1.2（2 小时）：改 `RunPythonTool`，把 subprocess 替换为 agentscope-runtime（参考 [[_patterns/tool-metadata-driven-context-lifecycle]]，`auto_free_after` 协议保留）
+- P1.2（2 小时）：改 `RunPythonTool`，把 subprocess 替换为 agentscope-runtime（参考 [[_patterns/tool-metadata-driven-context-lifecycle]]；注：~~`auto_free_after` 协议保留~~ 已于 2026-04-20 移除，工具生命周期现通过新架构管理）
 - **KB 补全**：把这次决策里暴露的 3 条 friction（download 安全专题、agentscope-runtime cookbook、egress-proxy-only pattern）按 ideas 流程走
