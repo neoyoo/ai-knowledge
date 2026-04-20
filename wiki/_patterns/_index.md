@@ -30,7 +30,7 @@ updated: 2026-04-19
 
 ## 现有 pattern
 
-- [[tool-metadata-driven-context-lifecycle]] — 工具元数据协议驱动的上下文生命周期（free/recall + 动态 system 注入 + 事件观测）
+- [[tool-metadata-driven-context-lifecycle]] — LLM 主动驱动的 tool_result + 历史消息生命周期（四层互补防线）
 
 ## 待评估想法（ideas/ 中）
 
