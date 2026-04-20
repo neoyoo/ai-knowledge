@@ -1,5 +1,7 @@
 # neoagent 模块映射
 
+> ⚠️ **Archived snapshot (pre-2026-04-20)**: `auto_free_after` was removed from neoagent upstream; descriptions below reflect the v1 mechanism. Current design: see [[tool-metadata-driven-context-lifecycle]] v2.
+
 **生成时间**: 2026-04-19
 **源路径**: /Users/neo/Desktop/project/git/neoagent/
 **主语言**: Python (async)

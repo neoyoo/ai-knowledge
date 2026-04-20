@@ -10,6 +10,8 @@ created: 2026-04-19
 updated: 2026-04-19
 ---
 
+> ⚠️ **Archived snapshot (pre-2026-04-20)**: `auto_free_after` was removed from neoagent upstream; descriptions below reflect the v1 mechanism. Current design: see [[tool-metadata-driven-context-lifecycle]] v2.
+
 ## 概述
 
 neoagent 的工具系统由 4 个解耦组件组成：`BaseTool`（抽象基类）→ `ToolRegistry`（纯数据结构注册表）→ `ToolExecutor`（执行层，管权限/并发/截断/hook/事件）→ `DeferredToolRegistry`（延迟索引，专为 MCP 用）。特色是 `BaseTool.auto_free_after: int` 字段——工具声明"我的结果超过 N 轮后应被折叠"，使上下文生命周期管理进入工具协议层；内置工具共 13 个，含 6 个文件操作、`run_python` 沙盒、`skill_load`/`write_skill` 动态技能、`tool_search`（MCP 发现）、`free_tool_result`/`recall_tool_result`（LLM 主动上下文管理）。

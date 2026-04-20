@@ -10,6 +10,8 @@ created: 2026-04-19
 updated: 2026-04-19
 ---
 
+> ⚠️ **Archived snapshot (pre-2026-04-20)**: `auto_free_after` was removed from neoagent upstream; descriptions below reflect the v1 mechanism. Current design: see [[tool-metadata-driven-context-lifecycle]] v2.
+
 ## 概述
 
 neoagent 的 `QueryLoop.run()` 是一个典型的 Python async 单循环（`core/loop.py`，340 行），但融合了 7 类横切关注点：context 压缩触发、deferred MCP 工具过滤、freed tool-result 重写、pre/post provider hook、memory 抽取、per-turn auto-save、auto_free_after 衰老追踪。循环以 Session 为一等公民（而非简单 `list[Message]`），通过 `SessionState` 跨轮持久化所有状态；stop_reason == "end_turn" 或无 tool_use 即退出，否则串 `ToolExecutor.execute()` 后进入下一轮。独特点：**freed/recall 机制把上下文管理从"一次性压缩"演进为"细粒度 tool_result 生命周期管理"**，是这套循环最有信息量的设计。

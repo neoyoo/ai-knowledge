@@ -1,3 +1,5 @@
+# ⚠️ Archived snapshot (pre-2026-04-20): auto_free_after was removed from neoagent upstream. Do not apply this patch. Current design: wiki/_patterns/tool-metadata-driven-context-lifecycle.md v2.
+
 # L1 Patch: context-management.md
 
 **生成时间**: 2026-04-19

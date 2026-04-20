@@ -10,6 +10,8 @@ created: 2026-04-19
 updated: 2026-04-19
 ---
 
+> ⚠️ **Archived snapshot (pre-2026-04-20)**: `auto_free_after` was removed from neoagent upstream; descriptions below reflect the v1 mechanism. Current design: see [[tool-metadata-driven-context-lifecycle]] v2.
+
 ## 概述
 
 neoagent 的上下文管理采取**双层主动策略**：一层是经典的 `ContextCompressor`（tiktoken 精确计数、70% 阈值触发、结构化摘要、前次摘要延续、3 次失败后降级截断）；另一层是**开创性的 freed/recall 机制**——工具协议层 `BaseTool.auto_free_after` 字段让单个 tool_result 到期后自动替换为 placeholder（size + 80 字预览），同时 `recall_tool_result` 工具让 LLM 主动从 freed 状态恢复单条内容"仅当前轮可见"。这一设计把"压缩整个历史"升级为"按工具粒度细粒度生命周期管理"，是同类项目中独一无二的形式化上下文回收协议。
