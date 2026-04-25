@@ -117,6 +117,15 @@ ln -s /path/to/ai-knowledge/skills/kb-ingest ~/.claude/skills/kb-ingest
 
 将两个 skill 链接或复制到 `~/.claude/skills/` 即可在 Claude Code 中启用。
 
+## 致谢
+
+- **[Obsidian](https://obsidian.md)** —— vault 基底。markdown + backlink + 本地优先存储让这种规模的知识图谱真正可用。
+- **卢曼（Niklas Luhmann）卡片盒方法** —— 按概念维度切（不是按来源/时间切），卡片之间是类型化关系，想法从 inbox 到 archive 有完整生命周期。
+- **Andrej Karpathy** —— 这个 vault 试图地图化的整个领域的核心框架：LLM 作为新计算界面、"Software 3.0"、以及"先重新推导再去 Google"的纪律。很多 wiki 页是从 Karpathy 提的问题出发的。
+- **[Claude Code](https://claude.com/claude-code)** —— skills 系统作为"按需加载知识"的接口，被我们镜像到 `kb-ingest` 7 阶段流水线（drafts → review → wiki）里。
+
+每一页 wiki 都追溯到具体源项目。每一个跨概念模式都来自把那些源放在一起读。
+
 ## 许可证
 
 MIT。见 `LICENSE`。

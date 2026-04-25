@@ -117,6 +117,15 @@ Two skills ship with this repo:
 
 Symlink or copy both to `~/.claude/skills/` to enable them in Claude Code.
 
+## Acknowledgments
+
+- **[Obsidian](https://obsidian.md)** — the vault substrate. Markdown + backlinks + local-first storage are what make this kind of knowledge graph practical at all.
+- **Niklas Luhmann's Zettelkasten method** — concept-first organization (cut by dimension, not by source); typed relations between cards; ideas have a lifecycle from inbox to archive.
+- **Andrej Karpathy** — the framing that defines the field this vault tries to map: LLMs as a new compute surface, "Software 3.0," and the recurring discipline of re-deriving rather than re-googling. Many wiki pages started from a question Karpathy posed.
+- **[Claude Code](https://claude.com/claude-code)** — the skills system as a knowledge-loading interface, mirrored in `kb-ingest`'s 7-phase pipeline (drafts → review → wiki).
+
+Every wiki page traces to specific source projects. Every cross-concept pattern came from reading those sources together.
+
 ## License
 
 MIT. See `LICENSE`.
