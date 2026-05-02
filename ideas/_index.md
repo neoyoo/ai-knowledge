@@ -23,7 +23,7 @@ updated: 2026-04-19
 | 文件 | 覆盖 | 活跃想法 |
 |------|------|---------|
 | [[kb-governance]] | 知识库治理、自进化、归档提升 | 3 条 |
-| [[neoagent-designs]] | neoagent 待抽取的原创设计 | 2 条 |
+| [[neoagent-designs]] | neoagent 待抽取的原创设计 | 3 条 |
 | [[sandbox-security]] | 沙箱选型、下载安全、代理层架构 | 3 条 |
 | [[web-service-architecture]] | Web 服务化 agent 的生命周期、prompt cache、持久化、存储分层 | 4 条 |
 | [[wiki-structure]] | wiki 本身的结构调整 | 1 条 |

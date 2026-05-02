@@ -72,6 +72,12 @@ concepts:
     definition: Agent/LLM 微调与训练管道——支持 SFT/DPO/GRPO 等算法及 prompt 自动优化
     note: "2026-04-15 由 AgentScope tuner/ 模块分析发现，升为第 13 个 L1 概念"
 
+  - id: agent-registry-discovery
+    title: Agent Registry & Discovery
+    aliases: [Agent 注册发现, agent registry, service discovery for agents, AgentCard]
+    definition: 让 Agent 作为可独立寻址的实体，彼此"知道对方是谁、在哪、能干什么"的机制——Agent OS 的地址总线
+    note: "2026-04-19 由 trip-os 分布式 subagent 决策摩擦催生，直接起草为 L1 概念页"
+
 # --- Relation Types ---
 relations:
   - id: uses

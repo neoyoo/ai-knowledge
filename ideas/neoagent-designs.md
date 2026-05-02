@@ -48,3 +48,39 @@ updated: 2026-04-19
 **落地**：通读 neoagent `hooks.py` + `events.py` 两个文件（都 <300 行），写成 `wiki/_insights/hook-event-dual-track.md`。
 
 **相关**：`shelf/neoagent/wiki/_impl/hooks--neoagent.md`、`wiki/hooks.md`、`wiki/evaluation-observability.md`
+
+---
+
+## 2026-04-23 — OTel + Langfuse 作为 neoagent 可观测性基础设施
+
+**status**: inbox  
+**potential_target**: `wiki/_patterns/agent-observability-stack.md` 或 `wiki/_insights/otel-langfuse-agent-tracing.md`
+
+**核心想法**：用 OpenTelemetry（标准链路追踪协议）+ Langfuse（LLM 专用可观测平台）组合，为 neoagent 建立完整的可观测层。OTel 负责跨进程 trace 采集和传输，Langfuse 负责 LLM 特有的语义记录（prompt、response、token 用量、cost）。两者互补，不锁定供应商。
+
+**接入设计**：在 neoagent 现有 EventBus/Observer 框架上挂载 `TracingSubscriber`，把 neoagent 的 10 种事件映射为 OTEL Span + Langfuse Generation，无需改动核心循环代码：
+- `ProviderRequestEvent` → `llm.generate` span start
+- `ProviderResponseEvent` → span end（自动记录 token/cost）
+- `ToolCallEvent/ToolResultEvent` → `tool.{name}` 子 span
+- `TurnCompleteEvent` → turn-level span boundary
+- Session 级 trace 在 `QueryLoop.__call__` 入口创建
+
+**为什么值得**：
+1. 可观测性是"全智能体公司"基建的必备层——没有它，无法回答"Agent 花了多少钱、哪一步最慢、为什么失败"
+2. neoagent 的 EventBus 设计让接入成本极低（2-3 天），不需要大改核心代码
+3. Langfuse 是 2023 年后出现的 LLM 专用工具，传统 APM（Datadog/New Relic）不具备 prompt/cost 原生追踪能力
+4. OTel 保证不锁定供应商，未来可无损迁移到其他 backend
+
+**落地**：
+1. 写 `neoagent/observe/tracing.py`（TracingSubscriber + LangfuseSubscriber）
+2. Langfuse 自托管部署（docker-compose）
+3. 在 trip-os 上跑通第一个端到端 trace，验证成本归因 accuracy
+4. 记录接入过程踩坑 → 沉淀为知识库 L2 页
+
+**风险**：
+- Langfuse 成熟度不如传统 APM，社区较小，长期维护风险
+- 跨进程 trace 传播（MCP Server、subagent）需要显式传递 `traceparent`，容易遗漏
+- 异步场景下 Python contextvars 可能丢失，需显式 `copy_context()`
+- Agent 行为回放（保存完整 context 可重跑）Langfuse 不支持，需自建
+
+**相关**：`wiki/evaluation-observability.md`、`wiki/tool-system.md`、`wiki/query-loop.md`、`shelf/neoagent/wiki/_impl/hooks--neoagent.md`

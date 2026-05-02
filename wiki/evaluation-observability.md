@@ -3,13 +3,13 @@ title: Evaluation & Observability
 aliases: [评估, observability, metrics, tracing]
 category: L1
 created: 2026-04-06
-updated: 2026-04-08
+updated: 2026-04-25
 relations:
   - target: "[[query-loop]]"
     type: uses
   - target: "[[tool-system]]"
     type: uses
-sources: [claude-code, openharness, deer-flow, hermes-agent]
+sources: [claude-code, openharness, deer-flow, hermes-agent, agentscope]
 ---
 
 ## 一句话定义
@@ -25,11 +25,11 @@ Agent 跑得好不好怎么知道 — 效果评估、运行指标、链路追踪
 
 ## 各家对比
 
-| 维度 | Claude Code | OpenHarness | DeerFlow | Hermes Agent |
-|------|------------|-------------|----------|--------------|
-| 核心设计 | 四层 observability 基础设施：analytics event pipeline（先队列后 sink 解耦）、cost/token tracking（跨 session 连续）、feature gate（GrowthBook 动态门控）、headless profiling；可观测性作为 agent runtime 的一等公民 | 围绕 token 计数和结构化事件流两个支柱：`CostTracker` 跨 turn 累计 usage 统计；`--output-format stream-json` 以换行分隔 JSON 事件流（assistant_delta/tool_started/tool_completed/assistant_complete）暴露实时执行过程 | 以 LangGraph 原生 SSE 流式输出为核心，提供模型 token、工具调用、subagent 任务状态的实时可见性；两个隐式评估机制：memory 置信度分数作为轻量级质量信号，`LoopDetectionMiddleware` 作为运行时自评估守卫 | 双轨设计：运行时可观测性（SessionDB SQLite WAL + 多平台写入 + InsightsEngine 多维分析）和 RL 训练评估（BatchRunner 轨迹生成 + TrajectoryCompressor 压缩 + WandB 指标 + 推理测试）两条线相对独立；本地优先，所有数据写入 `~/.hermes/` |
-| 关键特点 | 类型系统强制 PII 安全（`never` marker type 在编译期阻止 string 直接进 analytics）；`_PROTO_*` 字段约定区分数据访问级别；user bucket（SHA-256 分 30 bucket）兼顾监控精度与隐私保护 | `stream-json` 模式提供结构清晰的事件流，外部工具可直接 pipe 消费（如 `jq`、CI 脚本）；tool_started/tool_completed 配对结构便于计算工具调用延迟；零依赖，不引入 OpenTelemetry 等重型依赖 | Loop detection 即运行时自评估（无需外部框架直接在执行路径中拦截质量问题）；memory confidence 作为隐式反馈信号（将用户纠错行为转化为质量数据）；SSE 细粒度流式可见性（subagent 任务级别状态广播）；零配置上手 | `normalize_usage()` 统一 Anthropic/OpenAI/Codex 三种 API 格式；`pricing_version` per-session 版本字符串（如 `anthropic-prompt-caching-2026-03-16`）支持费用审计溯源；BatchRunner 三道数据质量门禁（零推理过滤、工具名幻觉过滤、schema 归一化）；`LOCKED_FIELDS` 保障 RL 实验可复现性 |
-| 局限 | Datadog 仅限 firstParty 提供商，第三方部署无 Datadog 数据；cost tracking 在 session 结束才 flush，长任务 budget 超限检测有延迟 | 仅 token 数量，无美元成本估算；未集成 OpenTelemetry，无 trace/span 和分布式追踪能力；无错误监控，无 Sentry 风格的异常捕获；日志为 Python logging 非结构化输出 | 无结构化遥测（不支持 OpenTelemetry）；无成本追踪；无自动化 eval 框架；仅实时可观测（SSE 事件不持久化，无法历史 trace 回溯） | 无外部 telemetry sink（无 Datadog/Sentry/OpenTelemetry），大规模部署 log 分析全靠 grep；`rl_check_status()` 30 分钟全局 rate limit，训练初期无法获得状态反馈；WandB 强依赖，不可用时指标全部为空；`_active_runs` 进程内存状态，重启后训练状态不可恢复 |
+| 维度 | Claude Code | OpenHarness | DeerFlow | Hermes Agent | AgentScope |
+|------|------------|-------------|----------|--------------|-----------|
+| 核心设计 | 四层 observability 基础设施：analytics event pipeline（先队列后 sink 解耦）、cost/token tracking（跨 session 连续）、feature gate（GrowthBook 动态门控）、headless profiling；可观测性作为 agent runtime 的一等公民 | 围绕 token 计数和结构化事件流两个支柱：`CostTracker` 跨 turn 累计 usage 统计；`--output-format stream-json` 以换行分隔 JSON 事件流（assistant_delta/tool_started/tool_completed/assistant_complete）暴露实时执行过程 | 以 LangGraph 原生 SSE 流式输出为核心，提供模型 token、工具调用、subagent 任务状态的实时可见性；两个隐式评估机制：memory 置信度分数作为轻量级质量信号，`LoopDetectionMiddleware` 作为运行时自评估守卫 | 双轨设计：运行时可观测性（SessionDB SQLite WAL + 多平台写入 + InsightsEngine 多维分析）和 RL 训练评估（BatchRunner 轨迹生成 + TrajectoryCompressor 压缩 + WandB 指标 + 推理测试）两条线相对独立；本地优先，所有数据写入 `~/.hermes/` OTel 标准 + 内置评估管道的双模块设计：`tracing/` 通过五类专用装饰器（`trace_reply`/`trace_llm`/`trace_toolkit`/`trace_embedding`/`trace_format`）为 Agent/LLM/Tool/Embedding/Formatter 各调用层注入 span，全部遵循 OpenTelemetry GenAI Semantic Conventions；`evaluate/` 提供 Benchmark-Task-Metric-Evaluator-Storage 五层评估管道，通过 `_InMemoryExporter` + OTel Baggage 把运行时追踪数据自动桥接为评测指标统计，实现"评测时自动采集 token/工具调用次数"的闭环；支持 GeneralEvaluator（串行）和 RayEvaluator（Ray 并发）两种评测执行模式 |
+| 关键特点 | 类型系统强制 PII 安全（`never` marker type 在编译期阻止 string 直接进 analytics）；`_PROTO_*` 字段约定区分数据访问级别；user bucket（SHA-256 分 30 bucket）兼顾监控精度与隐私保护 | `stream-json` 模式提供结构清晰的事件流，外部工具可直接 pipe 消费（如 `jq`、CI 脚本）；tool_started/tool_completed 配对结构便于计算工具调用延迟；零依赖，不引入 OpenTelemetry 等重型依赖 | Loop detection 即运行时自评估（无需外部框架直接在执行路径中拦截质量问题）；memory confidence 作为隐式反馈信号（将用户纠错行为转化为质量数据）；SSE 细粒度流式可见性（subagent 任务级别状态广播）；零配置上手 | `normalize_usage()` 统一 Anthropic/OpenAI/Codex 三种 API 格式；`pricing_version` per-session 版本字符串（如 `anthropic-prompt-caching-2026-03-16`）支持费用审计溯源；BatchRunner 三道数据质量门禁（零推理过滤、工具名幻觉过滤、schema 归一化）；`LOCKED_FIELDS` 保障 RL 实验可复现性 OTel 标准属性 + `agentscope.*` 扩展双层命名，trace 数据无需适配层即可接入 Jaeger/Grafana/Langfuse；`_InMemoryExporter` 既可连外部 OTLP 后端（生产观测），又可在评测时切换为内存导出（指标统计），同一套 tracing 基础设施两用；`FileEvaluatorStorage` 在每次执行前检查已有结果文件，天然支持断点续评；ACEBenchmark 内置中文手机 Agent 工具调用基准（ACEAccuracy 最终状态 + ACEProcessAccuracy 里程碑路径），支持过程准确率（trajectory 级别）而非只看最终结果；流式 LLM 响应通过 generator wrapper 在最后一个 chunk 后才写 span 属性，保持 span 完整性 |
+| 局限 | Datadog 仅限 firstParty 提供商，第三方部署无 Datadog 数据；cost tracking 在 session 结束才 flush，长任务 budget 超限检测有延迟 | 仅 token 数量，无美元成本估算；未集成 OpenTelemetry，无 trace/span 和分布式追踪能力；无错误监控，无 Sentry 风格的异常捕获；日志为 Python logging 非结构化输出 | 无结构化遥测（不支持 OpenTelemetry）；无成本追踪；无自动化 eval 框架；仅实时可观测（SSE 事件不持久化，无法历史 trace 回溯） | 无外部 telemetry sink（无 Datadog/Sentry/OpenTelemetry），大规模部署 log 分析全靠 grep；`rl_check_status()` 30 分钟全局 rate limit，训练初期无法获得状态反馈；WandB 强依赖，不可用时指标全部为空；`_active_runs` 进程内存状态，重启后训练状态不可恢复 `finish_reason` 硬编码为 `"stop"`（有 FIXME 注释），不反映实际 `tool_use`/`length` 等终止原因；`_InMemoryExporter` 依赖 Baggage 上下文，多线程环境下传播失败时统计数据静默丢弃；GeneralEvaluator 串行执行 Metric，多指标场景效率低（需 Ray 依赖才能并行）；ACEBenchmark 仅支持中文数据集，英文版本注释未启用；tracing 装饰器主要覆盖 async 路径，同步自定义模型需手动添加 |
 
 ## 设计权衡
 

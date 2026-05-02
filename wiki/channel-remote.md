@@ -3,7 +3,7 @@ title: Channel & Remote
 aliases: [渠道, remote execution, multi-channel]
 category: L1
 created: 2026-04-06
-updated: 2026-04-08
+updated: 2026-04-25
 relations:
   - target: "[[query-loop]]"
     type: uses
@@ -12,7 +12,7 @@ relations:
   - target: "[[sandbox-isolation]]"
     type: feeds
     evidence: "HTTP/WS channel 暴露后威胁模型从'本机单用户'跳到'多租户 SaaS'，agent 所有代码执行工具必须从 subprocess 弱沙箱升级到容器/微 VM 级隔离；channel 的开放程度直接决定 sandbox-isolation 的档次要求"
-sources: [claude-code, openharness, deer-flow, hermes-agent]
+sources: [claude-code, openharness, deer-flow, hermes-agent, agentscope]
 ---
 
 ## 一句话定义
@@ -27,11 +27,11 @@ sources: [claude-code, openharness, deer-flow, hermes-agent]
 
 ## 各家对比
 
-| 维度 | Claude Code | OpenHarness | DeerFlow | Hermes Agent |
-|------|------------|-------------|----------|-------------|
-| 核心设计 | Channel（MCP 子协议，解决外部消息通道异步接入）+ Remote Session（把云端 agent 实例折叠回本地 task 系统统一编排），两者共同将 agent 从终端内对话循环扩展为跨设备可恢复 agent runtime | Python 后端 + React/Ink TUI 前端通过 stdio JSON 协议通信的混合架构；`BridgeSessionManager` 管理长生命周期子进程；cron 系统通过 `RemoteTriggerTool` 支持定时触发 agent 执行；当前"远程"本质上是本地子进程管理 | Nginx 反向代理统一入口（`:2026`）三服务架构（LangGraph Server + FastAPI Gateway + Next.js），内置 Slack/Telegram/Feishu/WeCom 四个 IM 平台适配器，同时提供嵌入式 Python SDK（`DeerFlowClient`）和 ACP 协议跨 harness 互调 | `GatewayRunner` 单 asyncio 事件循环并发驱动 16 个平台适配器；`BasePlatformAdapter` 三抽象方法 + 可选 override 接口统一所有平台差异；session key 三维语义（DM/群组/thread，thread 默认共享）；`SessionResetPolicy` 四模式 + memory flush 前置；cron 文件锁 + SILENT_MARKER + Matrix E2EE 优先投递；6 种执行后端（local/Docker/SSH/Modal/Daytona/Singularity）|
-| 关键特点 | Channel 复用整套 MCP 基础设施（无需单独发明 IM 插件 runtime）；权限 relay 走结构化 typed notification 而非文本 regex（防止自然语言误触发）；`RemoteAgentTask` 把远程 session 折叠为本地 task，支持 `--resume` 跨 CLI 重启 | 混合语言架构（Python + Node.js React/Ink），stdio JSON 协议解耦，各语言专注擅长领域；cron 调度内置，JSON 存储简单可审计；`WorkSecret` 凭证编码为未来网络化扩展预留接口形态 | 最完整的 channel 覆盖（4 个 IM 平台 + Web UI + Python SDK + ACP）；嵌入式 SDK 无服务器运行（`DeerFlowClient` 零基础设施启动）；ACP 协议实现跨 harness 互操作（可作为 meta-orchestrator 调度外部 agent）；Nginx 统一入口简化运维 | 16 个平台 + 6 个执行后端，覆盖面最广；智能模型路由（每条消息自动在廉价/强模型间切换）；`_agent_cache` 按 session key 缓存 agent 实例（保全 prefix cache，避免 ~10x 额外费用）；平台感知 PII 脱敏（WhatsApp/Signal/Telegram 启用，Discord 排除保留 `<@user_id>` mention 语义）；typing 暂停机制解决 Slack 输入框锁定问题 |
-| 局限 | Channel 依赖 Claude.ai OAuth，纯 API key 用户无法使用；Remote session 要求 git repo + git remote；远程 session 只能 HTTP 轮询不能 WebSocket 推送 | 无 WebSocket 服务端，无 OAuth，无云端 channel；所谓"远程"是本地子进程管理；`WorkSecret` 机制已设计但未连接任何活跃网络端点；stdio JSON 通信在进程异常退出时缺乏健壮的重连机制 | Channel 适配器偏薄（仅处理纯文本，不支持富交互元素）；SSE 单向推送（无 WebSocket 双向通信）；无 per-channel 权限模型；IM 平台依赖平台侧 Webhook，本地开发需 ngrok 中转 | 所有适配器共享单进程 asyncio loop，WhatsApp Node.js bridge 阻塞可影响其他平台延迟；session key 不跨平台（同一用户 Telegram/Discord 是两个独立 session）；`_agent_cache` 无 LRU/TTL 驱逐，大量用户场景内存持续增长；cron 文件锁无法水平扩展到多机；所有会话共享同一 `TERMINAL_ENV`，无法为不同用户或平台配置不同执行后端 |
+| 维度 | Claude Code | OpenHarness | DeerFlow | Hermes Agent | AgentScope |
+|------|------------|-------------|----------|-------------|-----------|
+| 核心设计 | Channel（MCP 子协议，解决外部消息通道异步接入）+ Remote Session（把云端 agent 实例折叠回本地 task 系统统一编排），两者共同将 agent 从终端内对话循环扩展为跨设备可恢复 agent runtime | Python 后端 + React/Ink TUI 前端通过 stdio JSON 协议通信的混合架构；`BridgeSessionManager` 管理长生命周期子进程；cron 系统通过 `RemoteTriggerTool` 支持定时触发 agent 执行；当前"远程"本质上是本地子进程管理 | Nginx 反向代理统一入口（`:2026`）三服务架构（LangGraph Server + FastAPI Gateway + Next.js），内置 Slack/Telegram/Feishu/WeCom 四个 IM 平台适配器，同时提供嵌入式 Python SDK（`DeerFlowClient`）和 ACP 协议跨 harness 互调 | `GatewayRunner` 单 asyncio 事件循环并发驱动 16 个平台适配器；`BasePlatformAdapter` 三抽象方法 + 可选 override 接口统一所有平台差异；session key 三维语义（DM/群组/thread，thread 默认共享）；`SessionResetPolicy` 四模式 + memory flush 前置；cron 文件锁 + SILENT_MARKER + Matrix E2EE 优先投递；6 种执行后端（local/Docker/SSH/Modal/Daytona/Singularity） | `realtime/` 模块提供基于 WebSocket 的双向流式实时对话通道，统一抽象 OpenAI / DashScope / Gemini 三家 Realtime API；定义三层事件体系（ModelEvents / ServerEvents / ClientEvents）解耦模型原生协议与前后端通信；`tts/` 模块独立提供语音合成通道，支持非流式和流式输入两种模式；两模块共同构成多模态实时交互层 |
+| 关键特点 | Channel 复用整套 MCP 基础设施（无需单独发明 IM 插件 runtime）；权限 relay 走结构化 typed notification 而非文本 regex（防止自然语言误触发）；`RemoteAgentTask` 把远程 session 折叠为本地 task，支持 `--resume` 跨 CLI 重启 | 混合语言架构（Python + Node.js React/Ink），stdio JSON 协议解耦，各语言专注擅长领域；cron 调度内置，JSON 存储简单可审计；`WorkSecret` 凭证编码为未来网络化扩展预留接口形态 | 最完整的 channel 覆盖（4 个 IM 平台 + Web UI + Python SDK + ACP）；嵌入式 SDK 无服务器运行（`DeerFlowClient` 零基础设施启动）；ACP 协议实现跨 harness 互操作（可作为 meta-orchestrator 调度外部 agent）；Nginx 统一入口简化运维 | 16 个平台 + 6 个执行后端，覆盖面最广；智能模型路由（每条消息自动在廉价/强模型间切换）；`_agent_cache` 按 session key 缓存 agent 实例（保全 prefix cache，避免 ~10x 额外费用）；平台感知 PII 脱敏（WhatsApp/Signal/Telegram 启用，Discord 排除保留 `<@user_id>` mention 语义）；typing 暂停机制解决 Slack 输入框锁定问题 | 三层事件体系通过命名约定（`model_` ↔ `agent_`）实现机械自动映射，`ServerEvents.from_model_event()` 用类名替换 + `model_dump()` + `model_validate()` 完成转换，新增事件类型无需手写映射；异步工具调用以 `asyncio.create_task` 派发，结果双路通知（Realtime API 继续对话 + outgoing_queue 广播前端）；`RealtimeModelBase` 抽象层把三家协议差异隔离在各自 `parse_api_message` 中，`RealtimeAgent` 层零感知；DashScope CosyVoice TTS 以 LCM(2,3)=6 字节边界进行 PCM+base64 双对齐；`cold_start_length` 参数控制首批 TTS 最低文本量，解决流式 LLM 输出接驳 TTS 时的冷启动停顿问题 |
+| 局限 | Channel 依赖 Claude.ai OAuth，纯 API key 用户无法使用；Remote session 要求 git repo + git remote；远程 session 只能 HTTP 轮询不能 WebSocket 推送 | 无 WebSocket 服务端，无 OAuth，无云端 channel；所谓"远程"是本地子进程管理；`WorkSecret` 机制已设计但未连接任何活跃网络端点；stdio JSON 通信在进程异常退出时缺乏健壮的重连机制 | Channel 适配器偏薄（仅处理纯文本，不支持富交互元素）；SSE 单向推送（无 WebSocket 双向通信）；无 per-channel 权限模型；IM 平台依赖平台侧 Webhook，本地开发需 ngrok 中转 | 所有适配器共享单进程 asyncio loop，WhatsApp Node.js bridge 阻塞可影响其他平台延迟；session key 不跨平台（同一用户 Telegram/Discord 是两个独立 session）；`_agent_cache` 无 LRU/TTL 驱逐，大量用户场景内存持续增长；cron 文件锁无法水平扩展到多机；所有会话共享同一 `TERMINAL_ENV`，无法为不同用户或平台配置不同执行后端 | DashScope Realtime 不支持 Tools（`support_tools = False`）；CosyVoice TTS 不支持并发多路合成（注释明确不能处理交叉消息）；OpenAI 并行工具调用有缺陷（`_tool_args_accumulator` 设计一次只能可靠处理一个工具调用，有 TODO 注释）；Session 生命周期薄弱（WebSocket 断开后无状态持久化或恢复，重连需从头建立 session）；`tts/` 与 `realtime/` 模块未集成，LLM 文字回复转 TTS 语音输出需用户自己写桥接逻辑；Gemini token 计数硬编码为 0，成本追踪不可用 |
 
 ## 设计权衡
 

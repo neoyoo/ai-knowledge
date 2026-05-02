@@ -31,7 +31,7 @@ rules:
   # Pass 5: Relation type validation
   relation-types:
     description: relations[].type 必须是 ontology.yaml 中定义的 6 种之一
-    valid: [uses, feeds, contradicts, evolved-into, alternative, extends]
+    valid: [uses, feeds, contradicts, evolved-into, alternative, extends, depends_on, supports]
     severity: error
 
   # Pass 6: Naming convention

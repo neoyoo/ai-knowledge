@@ -1,0 +1,105 @@
+# L1 Patch: prompt-system ← agentscope
+生成时间: 2026-04-15
+基于 L2: drafts/agentscope/wiki/_impl/prompt-system--agentscope.md
+目标 L1: wiki/prompt-system.md（已存在）
+
+---
+
+## OP-1: 新增对比表列
+
+### 插入位置
+
+在 L1「各家对比」表（`## 各家对比`）的表头和现有四列之后，追加 AgentScope 列。
+
+### 表头变更
+
+原表头行：
+```
+| 维度 | Claude Code | OpenHarness | DeerFlow | Hermes Agent |
+|------|------------|-------------|----------|-------------|
+```
+
+改为：
+```
+| 维度 | Claude Code | OpenHarness | DeerFlow | Hermes Agent | AgentScope |
+|------|------------|-------------|----------|-------------|-----------|
+```
+
+### 各行追加内容（逐行在行尾 `|` 前插入）
+
+**核心设计列**，新增单元格内容：
+```
+ **外置 Formatter 层 + 双模式**：`Msg` 对象列表 → `FormatterBase.format()` → provider-specific `list[dict]`。每个 provider 提供 `ChatFormatter`（单 agent）和 `MultiAgentFormatter`（多 agent）两个变体，均继承 `TruncatedFormatterBase`，支持令牌计数 + 自动渐进截断。formatter 由外部注入 agent，与 model 完全解耦。
+```
+
+**关键特点列**，新增单元格内容：
+```
+ 双模式解决多 agent API 兼容：`MultiAgentFormatter` 把历史轮次的多 agent 发言压成带 `<history>` 标签的单条 user 消息，绕过各家 API 不允许 assistant→assistant 连续消息的限制；截断时用 `tool_call_id` set 追踪配对关系，以完整 tool_use+tool_result 对为最小删除单元，防止 provider API 报错；内建 `@trace_format` OpenTelemetry 装饰器，formatter 公共入口零改动即可追踪。
+```
+
+**局限列**，新增单元格内容：
+```
+ `MultiAgentFormatter` 历史压缩损失消息边界结构，多 agent 角色强区分场景下模型理解质量下降；截断策略固定（从最老消息开始删整对），不可配置按重要性/语义/角色保留；`promote_tool_result_images` 把 base64 图片存为本地文件，分布式部署路径不可移植；formatter capability 标记（`support_vision`/`support_tools_api`）仅做标注，框架不自动降级或拦截，只打 warning。
+```
+
+### 完整新增行（便于直接对照插入）
+
+在现有 Hermes Agent 数据行末尾 `|` 前，以下为 AgentScope 单元格完整内容，表格中每行末尾追加对应单元格：
+
+```markdown
+| 维度 | Claude Code | OpenHarness | DeerFlow | Hermes Agent | AgentScope |
+|------|------------|-------------|----------|-------------|-----------|
+| 核心设计 | 分层认知控制框架... | 通过 `build_runtime_system_prompt()`... | 分段组装... | **稳定缓存前缀 + 动态 ephemeral 追加**... | **外置 Formatter 层 + 双模式**：`Msg` 列表 → `FormatterBase.format()` → provider-specific `list[dict]`。ChatFormatter（单 agent）/ MultiAgentFormatter（多 agent）双变体均继承 `TruncatedFormatterBase`，内建令牌计数 + 渐进截断。formatter 通过构造函数注入 agent，与 model 完全解耦，可独立替换。 |
+| 关键特点 | 静态/动态 section 分离... | `effort` + `passes`... | 技能懒加载... | per-model 执行协议... | 双模式解决多 agent API 兼容：MultiAgentFormatter 把历史多 agent 发言压成带 `<history>` 标签的单条 user 消息，绕过 assistant→assistant 连续消息限制；`_truncate()` 以 tool_use+tool_result 配对为最小截断单元，防止 provider API 报错；`@trace_format` OpenTelemetry 装饰器内建于公共入口，零侵入追踪；A2A 双向桥接（`A2AChatFormatter`）可零改动接入 Google A2A 协议网络。 |
+| 局限 | 动态 section 持续膨胀... | 无 prompt caching... | 无提示缓存边界优化... | Skin 与 SOUL.md 无同步机制... | MultiAgentFormatter 历史压缩损失消息边界，角色强区分场景下模型理解下降；截断策略固定，不可配置语义/重要性保留；tool_result 图片存为本地文件，分布式部署不可移植；capability 标记（support_vision 等）仅做标注，框架不自动降级或拦截。 |
+```
+
+同时在 frontmatter `sources` 字段追加 `agentscope`：
+```yaml
+sources: [claude-code, openharness, deer-flow, hermes-agent, agentscope]
+```
+
+并在 `## L2 详情` 章节末尾追加：
+```markdown
+- [[prompt-system--agentscope]]
+```
+
+---
+
+## OP-2: 场景决策补充
+
+在 L1「设计权衡 → 场景决策指南」章节末尾（「**研究 / prompt 优化流水线**」条目之后），追加以下两个新场景：
+
+```markdown
+- **多 agent 对话 / 生产级 provider 多样化部署** → 外置 Formatter 层（AgentScope 方案）。把 prompt 组装完全分离为独立 formatter 对象，通过构造函数注入 agent，而非嵌入 model 或 agent 内部。好处：同一 model 可配不同 formatter（单 agent / 多 agent），压缩路径可替换 formatter，而不影响 model 代码；provider 差异（OpenAI / Anthropic / Gemini / DashScope）完全封装在各自 formatter 内，主流程无感知。证据：`ReactAgent.__init__(self, ..., formatter: FormatterBase, ...)` 将 formatter 作为显式依赖注入，而非在 agent 内部 hardcode。
+
+- **多 agent 场景下 API 兼容（assistant→assistant 连续消息）** → 双模式 Formatter（ChatFormatter + MultiAgentFormatter）。绝大多数 LLM API 要求 user/assistant 严格交替，多 agent 天然产生多 assistant 连续消息。解法：MultiAgentFormatter 把历史轮次多 agent 发言压缩为带 `<history>…</history>` 标签的单条 user 消息，同时保留工具调用序列的独立结构，使框架层透明解决 API 限制。与已有方案对比：Claude Code / OpenHarness / DeerFlow / Hermes Agent 均未处理此场景（它们各自为单 agent 对话设计），AgentScope 是当前 KB 中唯一提供多 agent 兼容方案的实现。注意权衡：历史压缩会丢失消息边界信息，强依赖角色区分时模型理解质量会下降。
+```
+
+在「常见陷阱」章节末尾追加：
+
+```markdown
+7. **截断时破坏工具调用配对**：渐进截断消息历史时，若只删 tool_use 而未删配对的 tool_result（或反之），provider API 会直接报错。对策：以完整的 tool_use+tool_result 对为最小删除单元，用 set 追踪未匹配的 tool_call_id，找到"队列清空"边界才截断（AgentScope `_truncate()` 的做法）。
+```
+
+---
+
+## OP-3: 跨概念关系
+
+在 L1 frontmatter `relations` 字段追加以下关系（暂无独立「关系」章节，追加到 frontmatter）：
+
+```yaml
+relations:
+  # 已有
+  - target: "[[query-loop]]"
+    type: feeds
+  - target: "[[context-management]]"
+    type: uses
+  # AgentScope 新增
+  - target: "[[multi-agent]]"
+    type: depends_on
+    evidence: "AgentScope MultiAgentFormatter 是多 agent 场景能使用标准 LLM API 的前提，formatter 层对 assistant→assistant 消息做透明兼容，prompt-system 设计必须感知 multi-agent 消息结构"
+  - target: "[[tool-system]]"
+    type: depends_on
+    evidence: "AgentScope formatter 对 tool_use/tool_result block 有配对删除约束（_truncate），且 promote_tool_result_images 需要感知工具返回内容类型，prompt 截断策略与工具调用结构强耦合"
+```

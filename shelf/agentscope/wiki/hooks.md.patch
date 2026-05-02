@@ -1,0 +1,77 @@
+# L1 Patch: hooks ← agentscope
+生成时间: 2026-04-15
+基于 L2: drafts/agentscope/wiki/_impl/hooks--agentscope.md
+目标 L1: wiki/hooks.md（已存在）
+
+---
+
+## OP-1: 新增对比表列
+
+在 L1「各家对比」表的 `| 维度 |` 行末尾追加 `AgentScope |`，并在各数据行末尾追加对应内容。
+
+**表头行**（在 `| Hermes Agent |` 后追加）：
+```
+AgentScope |
+```
+
+**数据行 1（核心设计）**（在 Hermes Agent 列后追加）：
+```
+元类（metaclass）编译期透明注入：`_AgentMeta.__new__` 在类创建时自动包裹 `reply`/`print`/`observe` 三个方法；ReActAgent 额外包裹 `_reasoning`/`_acting`；支持**实例级**和**类级**两个作用域（实例级先执行，类级后执行），均以 `OrderedDict` 维护，保证注册顺序即执行顺序 |
+```
+
+**数据行 2（关键特点）**（在 Hermes Agent 列后追加）：
+```
+**修改语义由返回值决定**：pre-hook 返回 `None` = 纯观测，返回新 dict 才替换入参；post-hook 同理，零返回即不修改输出。**深拷贝隔离副作用**：hook 收到的是 `deepcopy(kwargs)` / `deepcopy(output)`，修改拷贝不影响主流程，只有显式返回才传播。**同步/异步混用**：`_execute_async_or_sync_func` 运行时自动检测函数类型，无需开发者关心 event loop。**内置 Studio hook**：`_equip_as_studio_hooks(url)` 一行注册全局 pre_print 类级 hook，HTTP 推送失败 3 次重试 + 优雅降级，不崩溃主流程 |
+```
+
+**数据行 3（局限）**（在 Hermes Agent 列后追加）：
+```
+**无拦截/短路语义**：pre-hook 不能阻止主方法执行，无法实现缓存/条件跳过，只能 raise 异常绕行。**类级 hook 继承共享 bug**：子类 `register_class_hook` 实际写入父类共享的 `OrderedDict`，不同子类相互污染（团队已知，`hook_test.py` L619-L776 大量测试被注释）。**深拷贝开销**：每次 hook 调用都做 `deepcopy`，大消息体高频调用有性能代价且无法关闭。**hook 签名隐式约定**：pre-hook 必须是 `(self, kwargs: dict)`，post-hook 必须是 `(self, kwargs: dict, output)`，框架无类型校验，签名错误运行时才报错 |
+```
+
+完整插入后，「各家对比」表共 5 个实现列：Claude Code / OpenHarness / DeerFlow / Hermes Agent / AgentScope。
+
+---
+
+## OP-2: 场景决策补充
+
+在 L1「设计权衡 → 场景决策指南」末尾（在「如果是多接入面平台...」段落之后）追加以下内容：
+
+---
+
+**如果是 Python agent SDK、需要对所有 agent 实例透明地注入可观测性/中间件 → 元类编译期透明注入**
+
+AgentScope 的做法是：通过 metaclass 在类创建阶段一次性包裹所有目标方法，子类代码中完全没有 hook 相关代码，维护成本接近零。当有以下特征时优先考虑这个方案：
+
+- agent 类层次固定，核心方法名已知（如 `reply`、`observe`），不需要动态增减拦截点
+- 希望所有 agent 类自动继承 hook 能力，不需要手动调用 `super()` 或装饰器
+- 只需要"观测 + 可选修改"语义，不需要"短路"（元类方案的 pre-hook 无法取消主方法执行）
+
+代码证据：`agent/_agent_meta.py` L55-L144 的 `_AgentMeta.__new__` + `_wrap_with_hooks`。
+
+与已有方案的对比：
+- vs. DeerFlow middleware：DeerFlow 通过 `@Next/@Prev` 装饰器显式位置插入，开发者控制粒度更细；AgentScope 元类更透明但无法精确控制顺序（只有"实例级先、类级后"两层）。
+- vs. 函数 Hook（LangChain 方案）：两者都是 Python callable，但元类方案对子类完全透明；函数 hook 方案子类通常需要显式调用 `self.callbacks.on_xxx()`，耦合更明显。
+
+**注意**：元类方案有一个已知的类级 hook 继承共享问题——子类注册 class hook 时实际修改的是父类的 `OrderedDict`，导致不同子类 hook 相互污染。生产使用时应只在实例级注册 hook（`register_instance_hook`），或在每个子类上显式重声明 hook 容器。
+
+---
+
+## OP-3: 跨概念关系
+
+在 L1 frontmatter 的 `relations:` 列表中追加以下条目：
+
+```yaml
+  - target: "[[tool-system]]"
+    type: depends_on
+    evidence: "AgentScope 的 ReActAgent hook 在 _reasoning/_acting 两个方法上注入扩展点，这两个方法直接对应工具调用（acting）和思维链（reasoning）步骤；hooks 在工具执行粒度上的可观测性依赖 tool system 的分层结构"
+```
+
+同时在 L2 列表（`## L2 详情`）中追加：
+```
+- [[hooks--agentscope]]
+```
+
+附加说明：
+- AgentScope 的 hooks 与其 pipeline 调度机制（`Pipeline` / `SequentialPipeline`）在架构上是正交的——hooks 针对 agent 方法，pipeline 针对 agent 间消息流，两者互不依赖。因此不追加 `pipeline` 相关关系，避免误导。
+- AgentScope ReActAgent 的 `pre_reasoning`/`post_reasoning` hook 点揭示了 hooks 与 query-loop 的更细粒度连接（已有 `extends` 关系），但现有关系已充分表达，无需新增。

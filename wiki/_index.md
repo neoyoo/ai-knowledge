@@ -1,7 +1,7 @@
 ---
 title: AI Agent Knowledge Base
 category: index
-updated: 2026-04-19
+updated: 2026-04-25
 ---
 
 # AI Agent Knowledge Base
@@ -21,6 +21,7 @@ updated: 2026-04-19
 - [[memory-system]] — 跨会话持久记忆
 - [[multi-agent]] — 多 agent 协作
 - [[agent-registry-discovery]] — Agent 注册与发现（Agent OS 的地址总线）
+- [[finetuning-system]] — Agent/LLM 微调与训练管道
 
 ### Extension
 - [[hooks]] — 事件驱动扩展点
@@ -34,12 +35,20 @@ updated: 2026-04-19
 
 ## 来源项目
 
-| 项目 | 状态 | L2 页数 |
-|------|------|---------|
-| Claude Code | 已分析 | 0 (待导入) |
-| OpenAI Agents SDK | 计划中 | — |
-| Dify | 计划中 | — |
-| LangGraph | 计划中 | — |
+| 项目 | 状态 | L2 页数 | 备注 |
+|------|------|---------|------|
+| AgentScope | 已分析 | 12 | 唯一覆盖完整 finetuning pipeline 的源 |
+| Claude Code | 已分析 | 11 | 含 swarm 多 agent 后端 |
+| DeerFlow | 已分析 | 10 | middleware pipeline 设计 |
+| Hermes Agent | 已分析 | 11 | 含 `_agent_cache` prompt cache 经济学 |
+| MiroFish | 已分析 | — | （无 L2，架构文档级） |
+| Mempalace | 已分析 | — | （无 L2，架构文档级） |
+| neoagent | 已分析 | 10 | 设计密度最高的单一框架源 |
+| OpenHarness | 已分析 | 11 | TeamRecord 内存注册 |
+| SimpleMem | 已分析 | 10 | 记忆系统专项，双存储架构 |
+| OpenAI Agents SDK | 计划中 | — | |
+| Dify | 计划中 | — | |
+| LangGraph | 计划中 | — | |
 
 ## 关系类型
 
