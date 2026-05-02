@@ -76,3 +76,4 @@ Agent 跑得好不好怎么知道 — 效果评估、运行指标、链路追踪
 - [[evaluation-observability--openharness]]
 - [[evaluation-observability--deer-flow]]
 - [[evaluation-observability--hermes-agent]]
+- [[evaluation-observability--agentscope]]

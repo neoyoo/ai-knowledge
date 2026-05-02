@@ -33,6 +33,12 @@ updated: 2026-04-25
 - [[evaluation-observability]] — 效果评估 + 运行可观测
 - [[sandbox-isolation]] — LLM 授权代码执行的隔离机制
 
+### Cross-Concept Patterns
+- [[_patterns/_index]] — 跨多个 L1 概念的可迁移架构组合模式
+
+### Single-Source Insights
+- [[simplemem--dual-storage]] — SimpleMem 的 SQLite + LanceDB 双存储记忆架构
+
 ## 来源项目
 
 | 项目 | 状态 | L2 页数 | 备注 |

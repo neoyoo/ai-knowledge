@@ -81,5 +81,6 @@ class MultiTenantVectorStore:
 
 ## 来源
 - 项目：simplemem（实验级，仅作参考）
+- 相关概念：[[memory-system]]
 - 完整分析：[[shelf/simplemem/wiki/_impl/memory-system--simplemem]]
 - 核心文件：`MCP/server/database/user_store.py`、`MCP/server/database/vector_store.py`
