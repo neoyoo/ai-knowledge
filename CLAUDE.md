@@ -24,7 +24,7 @@
 |-----|------|---------|---------|
 | `raw/` | 原始材料区 | 每个源项目的 git clone / symlink（agentscope、claude-code、deer-flow、hermes、mempalace、neoagent、openharness、simplemem …） | 不可变。只读取，不修改 |
 | `wiki/` | 正式知识主干 | 顶层 `*.md` 为 L1 概念页（按架构维度组织，如 `tool-system.md`、`sandbox-isolation.md`）；`_impl/<concept>--<source>.md` 为 L2 per-source 实现分析；`_insights/<source>--<design>.md` 为单源精彩设计抽出；`_patterns/<slug>.md` 为**跨 L1 概念的组合模式**（可迁移架构语汇）；`_index.md` 总索引 | 只放通过质量门禁的成熟内容 |
-| `ideas/` | **好想法 inbox**（新） | 任何"值得但未落地"的想法，一想一页，frontmatter 带 `status: inbox\|incubating\|promoted\|dead`。定期 review 决定升级到 wiki/_patterns/ 或 wiki/_insights/ 或 practice/ 或宣布死亡 | 轻格式、低门槛、定期整理 |
+| `ideas/` | **好想法 inbox**（新） | 任何"值得但未落地"的想法，按功能域放入 `ideas/<domain>.md`；一个域文件可包含多条想法，每条想法 section 开头标 `**status**: inbox\|incubating\|promoted\|dead`，并尽量标 `**potential_target**:`。定期 review 决定升级到 wiki/_patterns/、wiki/_insights/、cookbook/、projects/ 或宣布死亡 | 轻格式、低门槛、定期整理 |
 | `cookbook/` | 实操层（"怎么动手做"） | `prompts/`（patterns、templates、anti-patterns）+ `tools/`（definitions 按功能分类、patterns、anti-patterns）+ `skills/`（patterns、templates、anti-patterns）| 实操模板和可复制 schema，和 wiki 的"为什么这样设计"互补 |
 | `schema/` | 配置与规范 | `ontology.yaml`（关系类型定义）、`lint-rules.yaml`（linter 规则）、`ingest-strategies.yaml`（ingest 策略）、`page-templates/`（L1.md / L2.md 模板）、`ingest-learnings.md`（每次 ingest 积累的经验） | 仅修改规范、不放知识内容 |
 | `shelf/` | 归档区（不合入主干） | 质量不够、架构不稳定、尚未成熟的源。每个项目带 `SHELF.md` 说明归档原因。完整 L2 分析保留以便查阅 | 不合并到 `wiki/`。L2 页保留可查，L1 patch 仅作参考不应用 |
