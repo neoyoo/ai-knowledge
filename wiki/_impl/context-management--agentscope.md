@@ -29,7 +29,7 @@ TruncatedFormatterBase._format(msgs)   ← 格式化为 API 所需 dict
 最终 prompt → 模型 API
 
 ReActAgent.reply()
-    ↓ _reasoning() 入口调用 _compress_memory_if_needed()     ← 每次模型推理前检查
+    ↓ 每轮 loop 在 _reasoning() 前调用 _compress_memory_if_needed()
        token_counter.count(formatter.format(sys+history))
        超过 trigger_threshold？
            LLM 生成 SummarySchema (结构化 JSON)
@@ -83,7 +83,7 @@ while True:
 
 ### 3. Memory 压缩层（`agentscope/agent/_react_agent.py`）
 
-`ReActAgent` 在进入 `_reasoning()`、真正调用模型前检查 `_compress_memory_if_needed()`：
+`ReActAgent.reply()` 的每轮 loop 都在调用 `_reasoning()`、真正请求模型前检查 `_compress_memory_if_needed()`：
 
 ```python
 async def _compress_memory_if_needed(self) -> None:
@@ -180,17 +180,17 @@ TruncatedFormatterBase.format(msgs)               # agentscope/formatter/_trunca
 
 ```
 ReActAgent.reply(x)                               # agentscope/agent/_react_agent.py
-└── _reasoning() → await self._compress_memory_if_needed()
-    ├── memory.get_memory(exclude_mark=COMPRESSED)
-    ├── 从后向前确定 keep_recent 轮边界（保持 tool_use/result 配对）
-    ├── formatter.format([sys_msg, *to_compress]) → prompt
-    ├── compression_config.agent_token_counter.count(prompt) → n_tokens
-    ├── n_tokens > trigger_threshold？
-    │   ├── compression_formatter.format([sys, *to_compress, compression_hint]) → compression_prompt
-    │   ├── compression_model(compression_prompt, structured_model=SummarySchema)
-    │   ├── memory.update_compressed_summary(summary_template.format(**metadata))
-    │   └── memory.update_messages_mark(ids, new_mark=COMPRESSED)
-    └── (reasoning 继续) memory.get_memory(prepend_summary=True) → [summary_msg] + recent_msgs
+├── await self._compress_memory_if_needed()
+│   ├── memory.get_memory(exclude_mark=COMPRESSED)
+│   ├── 从后向前确定 keep_recent 轮边界（保持 tool_use/result 配对）
+│   ├── formatter.format([sys_msg, *to_compress]) → prompt
+│   ├── compression_config.agent_token_counter.count(prompt) → n_tokens
+│   ├── n_tokens > trigger_threshold？
+│   │   ├── compression_formatter.format([sys, *to_compress, compression_hint]) → compression_prompt
+│   │   ├── compression_model(compression_prompt, structured_model=SummarySchema)
+│   │   ├── memory.update_compressed_summary(summary_template.format(**metadata))
+│   │   └── memory.update_messages_mark(ids, new_mark=COMPRESSED)
+└── await self._reasoning(...)                     # 内部 get_memory(prepend_summary=True)
 ```
 
 ### RAG 检索
