@@ -107,6 +107,10 @@ sources: [claude-code, openharness, deer-flow, hermes-agent, agentscope]
 - **独立压缩模型与主模型 token 计数器不一致**：`CompressionConfig.agent_token_counter` 必须与 agent 主模型使用相同的 counter；若主模型是 Anthropic 但 `agent_token_counter` 用 `CharTokenCounter`，触发阈值会严重偏移。AgentScope 文档建议明确传入与主模型匹配的 counter 实例。
 - **`keep_recent` 用 turn 数而非 token 数导致保留量不可预测**：`keep_recent=3` 在工具密集场景可能保留数万 token（每个 turn 有大量 tool_use/result），在纯文本对话中只保留几百 token；若需要精确的 token 预算控制，应改用 `keep_recent` 的 token-budget 版本或在压缩前先估算保留 turn 的 token 总量。
 
+## 相关模式
+
+- [[formatter-as-provider-boundary]] — formatter 层承接 token counting、截断循环和 tool_use/tool_result 配对边界
+
 ## L2 详情
 
 - [[context-management--claude-code]]

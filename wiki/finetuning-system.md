@@ -98,6 +98,10 @@ relations:
 |------|------|---------|------|
 | agentscope | v0.1.x（2024） | L2 详情 | 阿里巴巴出品，tuner/ 模块包含完整 GRPO/SFT/DSPy 管道 |
 
+## 相关模式
+
+- [[otel-eval-bridge]] — model selection / prompt optimization 可复用 tracing 指标作为 judge 输入
+
 ## L2 详情
 
 - [[finetuning-system--agentscope]]

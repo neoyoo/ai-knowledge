@@ -152,6 +152,10 @@ Hermes Agent 的 8 个外部 provider 覆盖了当前主流的记忆后端技术
 
 这张表的价值不在于选哪个，而在于揭示了不同技术路线的本质差异：**用户建模（Honcho）vs 事实图谱（Hindsight/Holographic）vs 全对话归档（Supermemory/OpenViking）vs 可靠性优先（Mem0 熔断器 / RetainDB write-behind）**。自建外部 provider 时，先想清楚你的核心诉求属于哪个象限。
 
+## 相关模式
+
+- [[state-module-tree-serialization]] — memory 作为状态树子模块参与统一保存/恢复
+
 ## L2 详情
 
 - [[memory-system--claude-code]]
