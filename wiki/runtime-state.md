@@ -82,6 +82,10 @@ Agent 运行时的状态容器 — 管理当前会话信息、配置、运行模
 
 8. **全量快照 + 高频保存导致存储/序列化开销线性膨胀**：每次 `save_session_state` 序列化所有注册模块完整状态，无 diff/patch 机制。对策：长对话场景控制保存频率（如每 N 轮或仅在关键节点保存），或在应用层对记忆内容做压缩/截断后再触发快照。（来源：AgentScope `SessionBase`）
 
+## 相关模式
+
+- [[state-module-tree-serialization]] — 将 runtime state、memory 和 session recovery 统一到递归状态树协议
+
 ## L2 详情
 
 - [[runtime-state--claude-code]]

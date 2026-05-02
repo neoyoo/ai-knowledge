@@ -31,6 +31,9 @@ updated: 2026-04-19
 ## 现有 pattern
 
 - [[tool-metadata-driven-context-lifecycle]] — LLM 主动驱动的 tool_result + 历史消息生命周期（四层互补防线）
+- [[state-module-tree-serialization]] — 递归状态树 + `state_dict()` 协议，统一 runtime / memory / session recovery
+- [[formatter-as-provider-boundary]] — 用 formatter 层隔离 provider 消息格式、截断与 multi-agent 兼容
+- [[otel-eval-bridge]] — 用 OpenTelemetry tracing 同时服务运行观测和离线评测指标
 
 ## 待评估想法（ideas/ 中）
 

@@ -70,6 +70,10 @@ Agent 运行时中负责动态组装发给模型的 prompt 的子系统，不是
 6. **注入防护单层过于脆弱**：仅靠正则关键词检测可被语义等价写法或 Unicode 零宽字符绕过。生产系统建议三层纵深：内容级（正则 + 不可见字符扫描）→ 路径级（敏感目录黑名单）→ 量级（外部注入占比上限），任意一层命中即阻断并明确提示，不要静默失败。
 7. **截断时破坏工具调用配对**：渐进截断消息历史时，若只删 tool_use 而未删配对的 tool_result（或反之），provider API 会直接报错。对策：以完整的 tool_use+tool_result 对为最小删除单元，用 set 追踪未匹配的 tool_call_id，找到"队列清空"边界才截断（AgentScope `_truncate()` 的做法）。
 
+## 相关模式
+
+- [[formatter-as-provider-boundary]] — 将 provider 差异、多 agent 消息兼容和截断策略收敛到 formatter 层
+
 ## L2 详情
 
 - [[prompt-system--claude-code]]

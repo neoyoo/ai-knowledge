@@ -82,6 +82,10 @@ Agent 断了怎么办 — checkpoint 保存、状态恢复、容错机制。
 
 **register_state 遗漏导致状态静默丢失**：AgentScope 的 `StateModule` 要求开发者在构造函数中手动调用 `register_state("attr_name")` 声明哪些属性参与序列化，遗漏声明的属性不会报任何警告——只是不被持久化。恢复后 agent 运行正常但状态不完整（如 plan 丢失但 memory 正常），极难排查。解法：在 agent 初始化后立即调用 `state_dict()` 打印并人工审查所有已注册属性，覆盖率测试中验证 save → load 后各关键字段非空。
 
+## 相关模式
+
+- [[state-module-tree-serialization]] — 用统一状态树协议降低 session recovery 的手写拼接成本
+
 ## L2 详情
 
 - [[session-recovery--claude-code]]
