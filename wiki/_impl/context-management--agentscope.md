@@ -29,7 +29,7 @@ TruncatedFormatterBase._format(msgs)   ← 格式化为 API 所需 dict
 最终 prompt → 模型 API
 
 ReActAgent.reply()
-    ↓ _compress_memory_if_needed()     ← 每轮 reply 开始前检查
+    ↓ _reasoning() 入口调用 _compress_memory_if_needed()     ← 每次模型推理前检查
        token_counter.count(formatter.format(sys+history))
        超过 trigger_threshold？
            LLM 生成 SummarySchema (结构化 JSON)
@@ -83,7 +83,7 @@ while True:
 
 ### 3. Memory 压缩层（`agentscope/agent/_react_agent.py`）
 
-`ReActAgent` 在每次 `reply()` 开始前调用 `_compress_memory_if_needed()`：
+`ReActAgent` 在进入 `_reasoning()`、真正调用模型前检查 `_compress_memory_if_needed()`：
 
 ```python
 async def _compress_memory_if_needed(self) -> None:
@@ -180,7 +180,7 @@ TruncatedFormatterBase.format(msgs)               # agentscope/formatter/_trunca
 
 ```
 ReActAgent.reply(x)                               # agentscope/agent/_react_agent.py
-└── await self._compress_memory_if_needed()       # :1015
+└── _reasoning() → await self._compress_memory_if_needed()
     ├── memory.get_memory(exclude_mark=COMPRESSED)
     ├── 从后向前确定 keep_recent 轮边界（保持 tool_use/result 配对）
     ├── formatter.format([sys_msg, *to_compress]) → prompt
@@ -190,7 +190,7 @@ ReActAgent.reply(x)                               # agentscope/agent/_react_agen
     │   ├── compression_model(compression_prompt, structured_model=SummarySchema)
     │   ├── memory.update_compressed_summary(summary_template.format(**metadata))
     │   └── memory.update_messages_mark(ids, new_mark=COMPRESSED)
-    └── (reply 继续) memory.get_memory(prepend_summary=True) → [summary_msg] + recent_msgs
+    └── (reasoning 继续) memory.get_memory(prepend_summary=True) → [summary_msg] + recent_msgs
 ```
 
 ### RAG 检索

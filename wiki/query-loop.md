@@ -11,6 +11,12 @@ relations:
     type: uses
   - target: "[[context-management]]"
     type: uses
+  - target: "[[hooks]]"
+    type: uses
+    evidence: "DeerFlow middleware hook 与 AgentScope 元类 hook 均直接介入 query-loop 的 before/after reasoning、tool acting 等生命周期点"
+  - target: "[[channel-remote]]"
+    type: supports
+    evidence: "query-loop 的流式输出、中断与异步生成器是 SSE / realtime channel 暴露执行过程的基础"
   - target: "[[multi-agent]]"
     type: depends_on
     evidence: "AgentScope MsgHub 将 query-loop 的 reply 广播到所有订阅 agent 的 memory，query-loop 与 multi-agent 拓扑强耦合；MsgHub auto-broadcast 要求 query-loop 在 __call__ 层完成后统一触发，不能在 reply 内部插播"

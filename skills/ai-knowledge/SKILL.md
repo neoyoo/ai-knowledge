@@ -31,7 +31,7 @@ description: |
 ```
 /Users/neo/Desktop/project/git/ai-knowledge/       ← 路径含空格
 ├── wiki/           L1 概念 + L2 实现 + 洞察 + 组合模式
-│   ├── *.md        12+ 个 L1 架构概念页
+│   ├── *.md        15 个 L1 架构概念页
 │   ├── _impl/      per-source L2 实现分析（<concept>--<source>.md）
 │   ├── _insights/  单源精彩设计抽出（<source>--<design>.md）
 │   └── _patterns/  跨概念组合模式（可迁移架构语汇）
@@ -162,8 +162,8 @@ Read("/Users/neo/Desktop/project/git/ai-knowledge/shelf/simplemem/SHELF.md")
 ### `projects/`（真实决策 + 摩擦日志）
 
 - `projects/<proj>/decisions/YYYY-MM-DD-<slug>.md` — 过往决策 + 依据的 KB 页
-- `projects/<proj>/kb-friction.md` — 使用 KB 的摩擦实时日志
-- `projects/<proj>/open-questions/` — 尚未回答的问题
+- `projects/<proj>/kb-friction.md` — 使用 KB 的摩擦实时日志（标准结构；不存在时按需创建）
+- `projects/<proj>/open-questions/` — 尚未回答的问题（可选结构）
 
 查相似场景的过往决策：
 

@@ -12,6 +12,15 @@ relations:
   - target: "[[tool-system]]"
     type: depends_on
     evidence: "AgentScope TruncatedFormatterBase._truncate() 和 _compress_memory_if_needed() 均用 tool_call_ids 集合追踪 tool_use/result 配对，截断和压缩边界必须感知 tool 边界才能产出合法 API 消息序列；工具调用密度直接影响 keep_recent 的实际 token 保留量。来源：agentscope/formatter/_truncated_formatter_base.py, agentscope/agent/_react_agent.py"
+  - target: "[[runtime-state]]"
+    type: uses
+    evidence: "跨压缩迭代摘要、压缩状态和 session 切换边界都依赖 runtime state 正确隔离"
+  - target: "[[session-recovery]]"
+    type: supports
+    evidence: "压缩摘要与被压缩消息标记需要随 session 快照恢复，否则恢复后上下文投影不完整"
+  - target: "[[evaluation-observability]]"
+    type: depends_on
+    evidence: "RAG / 压缩 / 截断策略上线前必须用检索质量、token、失败率等指标评估"
 sources: [claude-code, openharness, deer-flow, hermes-agent, agentscope]
 ---
 
@@ -31,7 +40,7 @@ sources: [claude-code, openharness, deer-flow, hermes-agent, agentscope]
 |------|------------|-------------|----------|--------------|------------|
 | 核心设计 | 主动调度器而非被动救火：持续监控 token 使用、提前保留 headroom、阈值触发时执行压缩，输出可继续推理和工具调用的完整对话快照（context projection） | 极简设计：token 估算用字符数/4 的启发式公式，压缩逻辑仅 58 行，通过滑动窗口保留最近 N 条消息、将旧消息替换为单条拼接文本摘要；无自动触发，无调用模型生成摘要 | `SummarizationMiddleware` 实现自动压缩，触发条件三选一（token 数/消息数/占最大上下文比例），触发后保留最近 N 条消息，旧消息替换为摘要；tiktoken 精确计数；中间件在 `after_model` 钩子挂载，与对话循环完全解耦 | 双流水线架构：`ContextCompressor`（对话时在线压缩）+ `TrajectoryCompressor`（训练数据离线批处理），共享"头尾保护 + 中间摘要替换"核心思路；在线压缩通过 7 段结构化模板（Goal/Progress/Decisions/Files/Next Steps 等）和跨压缩迭代摘要更新（`_previous_summary` 携带前次结果），实现多次压缩后信息不清零的"信息密度蒸馏" | 三层正交架构：**Token 计数层**（5 种后端统一 async 接口，本地或 API 调用均可）、**Formatter 截断层**（format 时按 token 限制自动 drop 最旧完整 turn）、**Memory 压缩层**（agent 级 LLM 驱动，结构化 SummarySchema 输出，压缩后旧消息打 COMPRESSED 标记而非删除）。三层完全解耦，可按需任意组合。 |
 | 关键特点 | `getEffectiveContextWindowSize()` 提前扣除输出预留空间；连续失败熔断机制（`MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES`）；模式感知——session_memory 模式下主动抑制自动压缩 | 整个压缩子系统 58 行完成，零外部依赖（无 tiktoken、无异步初始化）；成本追踪与压缩逻辑完全解耦；字符数估算足以支撑粗粒度判断，避免过度工程化 | 三模式触发最灵活（token_count/message_count/fraction，覆盖不同部署场景）；摘要模型可独立配置（主模型强推理，摘要用小模型降成本）；中间件模式干净解耦，替换或关闭不影响其他组件 | token-budget 尾部保护（按 token 量而非消息条数，随模型窗口自动缩放）；`_sanitize_tool_pairs()` 在每次压缩后修复孤儿 tool result/call；tools schema 纳入 token 估算（50+ 工具额外 20-30K token）；上下文探测从 API 错误实时解析真实限制并持久化缓存（`model@base_url` key），后续会话零探测复用 | `CompressionConfig` 支持独立压缩模型（主模型做推理、便宜小模型做摘要，分离成本）；结构化压缩输出（SummarySchema 5 字段各有 max_length，强制 JSON，避免自由文本摘要格式混乱）；tool_use/tool_result 配对安全截断（`tool_call_ids` 集合追踪，截断和压缩边界计算共用同一套机制）；被压缩消息保留原始存储可回溯（COMPRESSED 标记，正常检索跳过，调试/审计可按 ID 查询）；OpenAI 图片 token 精确实现（tile 算法，按模型系列差异化参数）；HuggingFace counter 直接调用 `apply_chat_template(tokenize=True, tools=tools)`，工具 schema 自动纳入计数 |
-| 局限 | 压缩质量依赖 LLM 能力；熔断后无降级策略（无截断最旧消息等回退手段）；触发阈值为静态配置不可动态调整 | 字符数/4 对中文、代码误差可达 2-5 倍；压缩不自动触发，需 agent loop 手动检测阈值；`compact_messages()` 只做文本拼接而非语义摘要，旧上下文可读性差 | 依赖 LangChain 内置实现，无法精细控制摘要提示词；无熔断机制（摘要调用失败时无降级处理）；压缩不感知语义边界，可能在工具调用链中间截断 | 摘要失败冷却期（600 秒）内中间段被静默删除而非保留（与 Claude Code 熔断保留内容不同，风险更高）；对话时压缩仍用 4 chars/token 粗估，结构化工具输出误差可超 30%；`should_compress()` 基于上一轮返回的 prompt_tokens，本轮超大工具输出可能在下轮才触发压缩 | 截断策略单一（只有"删最旧完整 turn"，无滑动窗口或重要性评分）；压缩触发仅在每轮 reply 开始前检查一次，单轮大量并行工具调用后无法 mid-flight 再次触发；压缩不处理多模态内容（源码 TODO 未解决）；RAG 检索结果不经过 Formatter 截断路径，超大检索结果无法被框架感知；AnthropicTokenCounter/GeminiTokenCounter 需网络 API 调用增加延迟；`keep_recent` 以完整 turn 数计而非 token 数，保留量不可预测；sentence 分割只支持英文 |
+| 局限 | 压缩质量依赖 LLM 能力；熔断后无降级策略（无截断最旧消息等回退手段）；触发阈值为静态配置不可动态调整 | 字符数/4 对中文、代码误差可达 2-5 倍；压缩不自动触发，需 agent loop 手动检测阈值；`compact_messages()` 只做文本拼接而非语义摘要，旧上下文可读性差 | 依赖 LangChain 内置实现，无法精细控制摘要提示词；无熔断机制（摘要调用失败时无降级处理）；压缩不感知语义边界，可能在工具调用链中间截断 | 摘要失败冷却期（600 秒）内中间段被静默删除而非保留（与 Claude Code 熔断保留内容不同，风险更高）；对话时压缩仍用 4 chars/token 粗估，结构化工具输出误差可超 30%；`should_compress()` 基于上一轮返回的 prompt_tokens，本轮超大工具输出可能在下轮才触发压缩 | 截断策略单一（只有"删最旧完整 turn"，无滑动窗口或重要性评分）；agent 层压缩在进入模型推理前检查，但工具执行过程中不会 mid-flight 再次触发；压缩不处理多模态内容（源码 TODO 未解决）；RAG 检索结果不经过 Formatter 截断路径，超大检索结果无法被框架感知；AnthropicTokenCounter/GeminiTokenCounter 需网络 API 调用增加延迟；`keep_recent` 以完整 turn 数计而非 token 数，保留量不可预测；sentence 分割只支持英文 |
 
 ## 设计权衡
 
