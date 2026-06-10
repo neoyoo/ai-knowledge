@@ -1,7 +1,7 @@
 ---
 title: Architectural Patterns
 category: index
-updated: 2026-04-19
+updated: 2026-06-10
 ---
 
 # 跨概念组合模式
@@ -31,9 +31,10 @@ updated: 2026-04-19
 ## 现有 pattern
 
 - [[tool-metadata-driven-context-lifecycle]] — LLM 主动驱动的 tool_result + 历史消息生命周期（四层互补防线）
-- [[state-module-tree-serialization]] — 递归状态树 + `state_dict()` 协议，统一 runtime / memory / session recovery
-- [[formatter-as-provider-boundary]] — 用 formatter 层隔离 provider 消息格式、截断与 multi-agent 兼容
+- [[state-module-tree-serialization]] — 历史模式：递归状态树 + `state_dict()` 协议；AgentScope 2.x 已迁移到 `AgentState + SessionRecord`
+- [[formatter-as-provider-boundary]] — 用 formatter 层隔离 provider 消息格式、多模态 tool result 投影与 multi-agent 兼容
 - [[otel-eval-bridge]] — 用 OpenTelemetry tracing 同时服务运行观测和离线评测指标
+- [[symbolic-context-map-progressive-recall]] — evidence-backed 符号上下文图 + 按需召回，连接 context / memory / tool / prompt
 
 ## 待评估想法（ideas/ 中）
 

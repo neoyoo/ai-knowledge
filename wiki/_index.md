@@ -1,7 +1,7 @@
 ---
 title: AI Agent Knowledge Base
 category: index
-updated: 2026-04-25
+updated: 2026-06-10
 ---
 
 # AI Agent Knowledge Base
@@ -38,20 +38,24 @@ updated: 2026-04-25
 
 ### Single-Source Insights
 - [[simplemem--dual-storage]] — SimpleMem 的 SQLite + LanceDB 双存储记忆架构
+- [[simplemem--evolvemem-retrieval-optimizer]] — SimpleMem/EvolveMem 的离线检索策略优化器
+- [[tencentdb-agent-memory--mmd-symbolic-context-map]] — TencentDB Agent Memory 的 MMD 高密度符号上下文图
 
 ## 来源项目
 
 | 项目 | 状态 | L2 页数 | 备注 |
 |------|------|---------|------|
-| AgentScope | 已分析 | 12 | 唯一覆盖完整 finetuning pipeline 的源 |
-| Claude Code | 已分析 | 11 | 含 swarm 多 agent 后端 |
-| DeerFlow | 已分析 | 10 | middleware pipeline 设计 |
-| Hermes Agent | 已分析 | 11 | 含 `_agent_cache` prompt cache 经济学 |
-| MiroFish | 已分析 | — | （无 L2，架构文档级） |
-| Mempalace | 已分析 | — | （无 L2，架构文档级） |
+| AgentScope | 已分析 | 14 | Python 2.x 主线：session/workspace/message-bus/team runtime |
+| AgentScope Java | 已分析 | 1 | AgentCard / A2A / Nacos / Spring Boot 服务化链路 |
+| Claude Code | 已分析 | 12 | 含 swarm 多 agent 后端 |
+| DeerFlow | 已分析 | 12 | middleware pipeline 设计 |
+| Hermes Agent | 已分析 | 12 | 含 `_agent_cache` prompt cache 经济学 |
+| MiroFish | 已分析 | 1 | multi-agent 应用型案例 |
+| Mempalace | 已分析 | 1 | backend/source adapter contract 与 raw memory 历史 |
 | neoagent | 已分析 | 10 | 设计密度最高的单一框架源 |
-| OpenHarness | 已分析 | 11 | TeamRecord 内存注册 |
-| SimpleMem | 已分析 | 10 | 记忆系统专项，双存储架构 |
+| OpenHarness | 已分析 | 12 | TeamRecord 内存注册 |
+| SimpleMem | shelf + insight | 10 | 记忆系统专项；EvolveMem 检索优化 insight 已提升 |
+| TencentDB Agent Memory | 已分析 | 1 | 记忆系统专项：短期 context offload + 长期 memory + MMD 符号图 |
 | OpenAI Agents SDK | 计划中 | — | |
 | Dify | 计划中 | — | |
 | LangGraph | 计划中 | — | |

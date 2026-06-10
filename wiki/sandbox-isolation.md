@@ -3,7 +3,7 @@ title: Sandbox Isolation
 aliases: [沙箱, 代码执行沙箱, code execution sandbox, run_python isolation]
 category: L1
 created: 2026-04-19
-updated: 2026-04-19
+updated: 2026-06-09
 relations:
   - target: "[[tool-system]]"
     type: depends_on
@@ -13,7 +13,7 @@ relations:
     evidence: "一旦 agent 通过 HTTP/WS 暴露给外部用户，威胁模型从'本机单用户'跳到'多租户 SaaS'，沙箱需求从可选变必需"
   - target: "[[runtime-state]]"
     type: uses
-    evidence: "持久 kernel 模式（E2B、agentscope-runtime）需要把沙箱会话绑到 runtime session 生命周期，创建/暂停/销毁协调"
+    evidence: "持久 kernel / workspace 模式（E2B、AgentScope Workspace）需要把沙箱会话绑到 runtime session 生命周期，创建/暂停/销毁协调"
 sources: [agentscope, deer-flow, openinterpreter, e2b, daytona, modal, pyodide, langchain, autogen, neoagent]
 ---
 
@@ -45,8 +45,9 @@ Docker 单独不够 T3——已知容器逃逸漏洞 + 共享宿主 kernel sysca
 
 | 项目 | 机制 | FS 隔离 | 网络隔离 | CPU/内存限制 | 启动延迟 | 状态 | 包生态 |
 |------|------|---------|----------|--------------|----------|------|--------|
-| AgentScope (主仓 `tool/_coding/_python.py`) | `subprocess_exec` + tempdir | 仅 cwd | 无 | 无 | ~instant | 无状态 | 宿主 Python |
-| AgentScope Runtime | Docker/gVisor/k8s/ACK 可插拔 + 持久 IPython kernel | 容器 | 容器 | cgroups（云上） | ~ms（预热池） | 跨调用持久 | 容器内 venv |
+| AgentScope Python `LocalWorkspace` | 本地 Bash/Edit/Glob/Grep/Read/Write 直接暴露 | workspace workdir | 无 | 无 | instant | session workspace | 宿主 |
+| AgentScope Python `DockerWorkspace` | 容器内 MCP gateway + bearer token | 容器 workdir | 容器网络 | Docker 配置 | 秒级 | session workspace | 容器内工具 |
+| AgentScope Python `E2BWorkspace` | 远程沙箱 workspace | 远程沙箱 | 远程沙箱 | E2B 服务决定 | 服务决定 | session workspace | E2B 环境 |
 | DeerFlow `AioSandboxProvider` | Docker 容器（`/mnt/user-data/{uploads,workspace,outputs}`） | 每任务独立目录 | 容器 | 容器默认 | 秒级 | 无状态 | 镜像决定 |
 | DeerFlow `LocalSandboxProvider` | 宿主 + 线程隔离目录 | 弱 | 无 | 无 | instant | 无状态 | 宿主 |
 | OpenInterpreter | 宿主进程内 Jupyter kernel（`JupyterLanguage`） | 无 | 无 | 无 | instant | 进程级持久 | 宿主全量 |
@@ -63,9 +64,9 @@ Docker 单独不够 T3——已知容器逃逸漏洞 + 共享宿主 kernel sysca
 - **LangChain PythonREPLTool** 是反面教材——裸 `exec()` 在主进程里跑，任何 LLM 注入直接命中你的 agent 进程
 - **OpenInterpreter** 默认把 LLM 代码塞进进程内 Jupyter kernel，连 T1 都谈不上真正隔离，只靠"每次弹确认框"做用户把关
 - **AutoGen Docker 执行器**：默认 root 用户、无网络限制、无 seccomp——本质是"清理边界"（exec 后容器销毁）而不是"安全边界"
-- **agentscope-runtime** 是自建方案里最完整的参考：可插拔后端（Docker/gVisor/ACK）、持久 IPython kernel per session、容器预热池、心跳回收
+- **AgentScope Python 2.x 的重点是 workspace 作为权限边界**：Local/Docker/E2B 三类 workspace 决定工具如何暴露，ChatService 把 workspace workdir 注入 permission context。Docker workspace 通过容器内 MCP gateway 暴露工具，比“每个工具自己接收 cwd 参数”更适合 Web/distributed agent。
 - **E2B** 把持久化玩到极致：`pause()` 把整个 microVM 序列化到磁盘，`resume()` 秒级恢复，成本接近 0 ——多租户长会话的经济学模型
-- **neoagent 的独特取舍**：subprocess 弱沙箱 + 环境变量白名单（drop API key）+ 进程组 SIGKILL。对自用 T1 场景比 AgentScope 主仓更安全（后者不过滤 env）；对 T3 必须外层再套容器
+- **neoagent 的独特取舍**：subprocess 弱沙箱 + 环境变量白名单（drop API key）+ 进程组 SIGKILL。对自用 T1 场景够轻；对 T3 必须外层再套容器/微 VM。
 
 ## 设计权衡
 
@@ -73,16 +74,16 @@ Docker 单独不够 T3——已知容器逃逸漏洞 + 共享宿主 kernel sysca
 
 | 方案 | 核心思路 | 适合场景 | 代表项目 |
 |------|----------|----------|----------|
-| subprocess + env/cwd 白名单 | 依赖 OS 进程边界，过滤环境变量和工作目录 | T1 自用，信任链短 | neoagent、AgentScope 主仓 |
-| Docker + cap-drop + seccomp | 共享宿主 kernel，但用 capability/syscall 减法收紧 | T2 本地且 LLM 半可信 | AutoGen、DeerFlow AioSandbox |
-| gVisor 用户态内核 | 重写 Linux syscall 子集（Sentry），宿主 kernel 对容器暴露面极小 | T3 多租户，启动要快、OCI 生态 | agentscope-runtime、Modal、Google Cloud Run |
+| subprocess + env/cwd 白名单 | 依赖 OS 进程边界，过滤环境变量和工作目录 | T1 自用，信任链短 | neoagent |
+| Docker + cap-drop + seccomp | 共享宿主 kernel，但用 capability/syscall 减法收紧 | T2 本地且 LLM 半可信 | AutoGen、DeerFlow AioSandbox、AgentScope DockerWorkspace |
+| gVisor 用户态内核 | 重写 Linux syscall 子集（Sentry），宿主 kernel 对容器暴露面极小 | T3 多租户，启动要快、OCI 生态 | Modal、Google Cloud Run |
 | Firecracker microVM | 真·硬件虚拟化，每沙箱一个微型 VM | T3 极致隔离 + 持久化需求 | E2B |
 | WASM | 编译到 WebAssembly，浏览器沙箱原生隔离 | T4 浏览器侧零服务端 | Pyodide、JupyterLite |
-| IPython kernel per session | 进程/容器内挂 Jupyter kernel，状态跨调用保留 | 多轮交互体验（配合上述隔离层使用） | E2B、agentscope-runtime、OpenInterpreter |
+| IPython kernel per session | 进程/容器内挂 Jupyter kernel，状态跨调用保留 | 多轮交互体验（配合上述隔离层使用） | E2B、OpenInterpreter |
 
 ### 交叉维度
 
-- **启动延迟**：subprocess ~instant < gVisor（warm pool）~ms < Firecracker ~150ms < 冷启动容器 秒级 < WASM 加载 秒级
+- **启动延迟**：subprocess/local workspace ~instant < gVisor（warm pool）~ms < Firecracker ~150ms < 冷启动容器 秒级 < WASM 加载 秒级
 - **隔离强度**：裸 exec « subprocess « Docker « Docker+gVisor ≈ Firecracker « WASM（语义上最强，但功能受限）
 - **包生态**：宿主 Python（subprocess、Docker 自定义镜像、Firecracker VM）100% > WASM（限于预编译轮子，无 libzbar 这类原生依赖）
 - **状态持久化**：无状态（subprocess per call）< FS snapshot（Modal） < 进程级持久 kernel（IPython）< 整 VM pause/resume（E2B）
@@ -99,7 +100,7 @@ Docker 单独不够 T3——已知容器逃逸漏洞 + 共享宿主 kernel sysca
 6. **subprocess env 白名单** —— 永远别透传 `AWS_*` / `OPENAI_API_KEY` / raw `os.environ`，明确列放行项
 7. **PIDs + 内存 + CPU cgroup 限制** —— fork bomb 防御。AutoGen、LangChain REPL 都没做
 8. **输出大小上限 + 超时** —— 防日志洪泛外泄 + CPU DoS
-9. **预热池 + 心跳回收** —— agentscope-runtime、Daytona 标配，sub-second 启动不牺牲隔离
+9. **预热池 + 心跳回收** —— Daytona 等托管沙箱标配，sub-second 启动不牺牲隔离
 10. **持久 kernel ≠ 持久租户** —— E2B 在 session 内保留 Jupyter 状态，session 结束整 VM 销毁。好的默认
 11. **exec 前静态扫描**（可选） —— OpenInterpreter Safe Mode 用 semgrep 扫 `rm -rf /`、`curl … | sh` 等模式
 12. **出口代理 MIME 强制** —— DeerFlow 把 HTML/SVG 强制 Content-Disposition: attachment，防 sandbox 吐回带 XSS 的内容被渲染
@@ -148,6 +149,10 @@ Google App Engine / Cloud Run / Cloud Functions、GKE Sandbox（RuntimeClass）�
 - [[runtime-state]] —— 持久 kernel 模式和 session 生命周期绑定
 - [[context-management]] —— 沙箱执行结果经常是大输出，触发压缩/free 机制
 
+## L2 详情
+
+- [[sandbox-isolation--agentscope]] — Python 2.x workspace / permission context / Docker MCP gateway
+
 ## 参考来源
 
 - gVisor 架构：https://gvisor.dev/docs/architecture_guide/
@@ -158,5 +163,5 @@ Google App Engine / Cloud Run / Cloud Functions、GKE Sandbox（RuntimeClass）�
 - OpenInterpreter Safe Mode：`docs/SAFE_MODE.md`
 - AutoGen Docker 执行器：`autogen_ext/code_executors/docker/_docker_code_executor.py`
 - LangChain Python REPL（反面教材）：`langchain_experimental/utilities/python.py`
-- AgentScope 主仓 Python 执行：`agentscope/tool/_coding/_python.py`
+- AgentScope Python 2.x workspace：`src/agentscope/workspace/`、`src/agentscope/permission/`
 - DeerFlow 沙箱 README security 段

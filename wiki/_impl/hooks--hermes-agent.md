@@ -3,10 +3,10 @@ title: "Hooks — Hermes Agent"
 category: L2
 parent: "[[hooks]]"
 source: hermes-agent
-source_version: "0.8.0"
+source_version: "0.16.0"
 confidence: high
 created: 2026-04-08
-updated: 2026-04-08
+updated: 2026-06-10
 ---
 
 ## 概述
@@ -216,6 +216,6 @@ step_cb = make_step_cb(conn, session_id, loop, tool_call_ids)
 
 ## 来源
 
-- 源码版本：hermes-agent v0.8.0
+- 源码版本：hermes-agent 0.16.0
 - 分析深度：源码级
 - 主要文件：`run_agent.py`、`cli.py`、`gateway/run.py`、`acp_adapter/server.py`、`acp_adapter/events.py`、`hermes_cli/plugins.py`、`hermes_cli/callbacks.py`、`environments/agent_loop.py`

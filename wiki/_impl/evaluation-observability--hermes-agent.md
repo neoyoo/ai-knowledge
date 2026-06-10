@@ -3,10 +3,10 @@ title: "Evaluation & Observability — Hermes Agent"
 category: L2
 parent: "[[evaluation-observability]]"
 source: hermes-agent
-source_version: "0.8.0"
+source_version: "0.16.0"
 confidence: high
 created: 2026-04-08
-updated: 2026-04-08
+updated: 2026-06-10
 ---
 
 ## 概述
@@ -260,6 +260,6 @@ Session 级 token/cost 数据只在 API 调用返回后更新，不支持实时�
 
 ## 来源
 
-- 源码版本：Hermes Agent 0.8.0
+- 源码版本：Hermes Agent 0.16.0
 - 分析深度：源码级
 - 主要分析文件：`hermes_state.py`、`agent/usage_pricing.py`、`agent/insights.py`、`batch_runner.py`、`trajectory_compressor.py`、`tools/rl_training_tool.py`、`environments/agent_loop.py`、`environments/hermes_base_env.py`、`hermes_logging.py`、`rl_cli.py`

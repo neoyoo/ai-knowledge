@@ -3,268 +3,235 @@ title: "query-loop——agentscope"
 category: L2
 parent: "[[query-loop]]"
 source: agentscope
-source_version: "0ff492c3508e532d2a33234dfe4a299833ce866c 2026-04-12"
+source_version: "v2.0.1-11-g0e5418e8"
 concept: "query-loop"
 created: "2026-04-15"
+updated: "2026-06-10"
 confidence: high
 ---
 
 ## 概述
 
-AgentScope 用 `ReActAgent` 实现经典 ReAct 主循环：在 `reply()` 中以 `for _ in range(max_iters)` 驱动 `_reasoning → _acting` 的迭代，退出条件是 LLM 不再输出 tool_use block。整个调用链完全异步（asyncio），工具调用支持顺序或并发两种执行模式，且每个环节（reply / reasoning / acting / observe / print）都被 metaclass 自动注入双向 hook，实现零侵入的全链路拦截。
+AgentScope Python 2.x 的 query loop 已从旧版 `AgentBase` / `ReActAgent` / metaclass hook / `pipeline` 结构，收敛到单个统一 `Agent` 类：`reply_stream()` 输出事件流，`_reply_impl()` 驱动 reasoning-acting loop，middleware 以 onion/transformer 方式包裹 reply、reasoning、acting、model call、system prompt 和 context compression。
+
+当前源码中未找到旧页引用的 `src/agentscope/pipeline/`、`MsgHub`、`A2AAgent`、`realtime/`、`tts/` 路径。多 agent/team 现在走 [[multi-agent--agentscope]] 的 session + MessageBus + team tools；跨进程 AgentCard/A2A/Nacos 走 [[agent-registry-discovery--agentscope-java]]。
 
 ---
 
-## 架构分析
+## 当前架构
 
-### 层次结构
+### 统一 Agent 类
 
-```
-AgentBase (StateModule, metaclass=_AgentMeta)
-  └─ ReActAgentBase (metaclass=_ReActAgentMeta)
-       └─ ReActAgent  ← 唯一内置的全功能 agent 实现
-```
+`Agent` 构造函数显式注入：
 
-- `AgentBase`：定义 `reply / observe / print / __call__` 接口，通过 `_AgentMeta` 元类在类创建时将这三个方法替换为带 hook 包装的版本。
-- `ReActAgentBase`：在 `AgentBase` 基础上增加 `_reasoning / _acting` 抽象方法，由 `_ReActAgentMeta` 再次注入 hook。
-- `ReActAgent`：唯一的产品级实现，持有 model / formatter / toolkit / memory / long_term_memory / knowledge 等所有依赖。
+- `name`
+- `system_prompt`
+- `model`
+- `toolkit`
+- `middlewares`
+- `state`
+- `offloader`
+- `model_config`
+- `context_config`
+- `react_config`
 
-### `__call__` 是入口，不是 `reply`
+`AgentState` 承载 session_id、summary、context、reply_id、cur_iter、permission_context、tool_context、tasks_context。也就是说 query loop 本身不再是孤立函数，而是围绕可持久化 state 和可注入 toolkit/middleware/offloader 运行。
 
-用户调用 `await agent(msg)` 触发的是 `AgentBase.__call__`：
+源码依据：
 
-```python
-async def __call__(self, *args, **kwargs) -> Msg:
-    self._reply_id = shortuuid.uuid()
-    self._reply_task = asyncio.current_task()
-    try:
-        reply_msg = await self.reply(*args, **kwargs)
-    except asyncio.CancelledError:
-        reply_msg = await self.handle_interrupt(*args, **kwargs)
-    finally:
-        if reply_msg:
-            await self._broadcast_to_subscribers(reply_msg)
-        self._reply_task = None
-    return reply_msg
-```
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/agent/_agent.py:94` — `class Agent`
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/agent/_agent.py:99` — 构造参数
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/state/_state.py:140` — `AgentState`
 
-`__call__` 负责两件事：捕获 `CancelledError` 实现中断（realtime steering），以及回复完成后向所有 MsgHub 订阅者广播（自动剥除 thinking block）。
+### reply_stream / reply 双入口
 
-### 核心循环结构（reply）
+AgentScope 2.x 有两个公开入口：
 
-`ReActAgent.reply()` 完整流程：
+- `reply_stream(inputs)`：流式产出 `AgentEvent`
+- `reply(inputs)`：消费同一条 `_reply()` 事件流，最终返回 `Msg`
 
-```
-1. memory.add(msg)                          ← 输入入库
-2. _retrieve_from_long_term_memory(msg)     ← 长期记忆检索（可选）
-3. _retrieve_from_knowledge(msg)            ← RAG 检索（可选）
-4. 注册 / 注销 generate_response tool       ← 结构化输出管理
-5. for _ in range(max_iters):
-   a. _compress_memory_if_needed()          ← token 超阈压缩（可选）
-   b. msg_reasoning = await _reasoning(tool_choice)
-   c. futures = [_acting(tc) for tc in tool_use_blocks]
-   d. 并发或顺序执行 futures
-   e. 判断退出：无 tool_use block → break
-6. 若超迭代未退出 → _summarizing()
-7. 静态长期记忆写回（可选）
-8. return reply_msg
-```
+Web channel 使用 `reply_stream()`，由 `ChatService` 将事件写入 MessageBus；同步调用场景可以使用 `reply()`。
 
-### Pipeline 层（agent 间编排）
+源码依据：
 
-Pipeline 不是 query-loop 本身，而是 agent 间的调用编排：
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/agent/_agent.py:191` — `reply_stream()`
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/agent/_agent.py:215` — `reply()`
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/_service/_chat.py:366` — `ChatService` 消费 `agent.reply_stream()`
 
-| 类型 | 实现 | 特点 |
-|------|------|------|
-| `sequential_pipeline` | 函数式，`for agent in agents: msg = await agent(msg)` | 链式传递，每步等待上一步 |
-| `fanout_pipeline` | `asyncio.gather` 或顺序执行 | 广播同一输入到多 agent，并发收集结果 |
-| `SequentialPipeline` / `FanoutPipeline` | 上述函数的类包装 | 可复用实例 |
-| `stream_printing_messages` | asyncio.Queue 生成器 | 将 agent 内部 `print()` 调用的中间消息暴露为异步生成器，用于 SSE 场景 |
+### _reply_impl 主循环
 
-### MsgHub（多 agent 对话广播）
+`_reply_impl()` 的核心流程：
 
-`MsgHub` 是一个 async context manager，在 `__aenter__` 时将参与 agent 互相设置为订阅者，`__aexit__` 时清除。当任一 agent 完成 `reply` 后，`__call__` 中的 `_broadcast_to_subscribers` 自动将其输出 `observe` 注入所有其他 agent 的 memory，无需手动传递消息。
+1. 区分输入是新消息，还是 `UserConfirmResultEvent` / `ExternalExecutionResultEvent`
+2. `_check_incoming_event()` 判断当前是否处于等待确认或外部执行结果状态
+3. 若是恢复事件，调用 `_handle_incoming_event()` 更新 tool call state/context
+4. 若是新消息，调用 `_handle_incoming_messages()` 写入 context，生成新的 `reply_id`，重置 `cur_iter`
+5. 产出 `ReplyStartEvent`
+6. 在 `cur_iter < max_iters` 内循环：
+   - `_check_next_action()` 判断应退出、reasoning 还是 acting
+   - reasoning 前调用 `compress_context()`
+   - `_reasoning()` 调模型并把流式 chunk 转成事件
+   - `_batch_tool_calls()` 根据工具属性拆成 sequential/concurrent batch
+   - 执行 tool calls，遇到用户确认或外部执行需求则暂停并返回等待消息
+7. 超过 max_iters 时产出 `ExceedMaxItersEvent`、`ReplyEndEvent` 和兜底 `AssistantMsg`
 
-### Hook 系统（元类注入）
+源码依据：
 
-`_AgentMeta.__new__` 在类定义时用 `_wrap_with_hooks` 替换 `reply / print / observe`：
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/agent/_agent.py:533` — `_reply_impl()`
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/agent/_agent.py:569` — `_check_incoming_event()`
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/agent/_agent.py:582` — 新 reply 重置 `reply_id` / `cur_iter`
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/agent/_agent.py:598` — reasoning-acting loop
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/agent/_agent.py:676` — max_iters 兜底事件
 
-```python
-# _agent_meta.py
-class _AgentMeta(type):
-    def __new__(mcs, name, bases, attrs):
-        for func_name in ["reply", "print", "observe"]:
-            if func_name in attrs:
-                attrs[func_name] = _wrap_with_hooks(attrs[func_name])
-        return super().__new__(mcs, name, bases, attrs)
-```
+### Reasoning 是事件转换器
 
-`_wrap_with_hooks` 执行顺序：`instance_pre_hooks → class_pre_hooks → original_func → instance_post_hooks → class_post_hooks`，每个 hook 都可以修改入参（pre）或返回值（post）。
+`_reasoning_impl()` 做三件事：
 
----
+1. `_prepare_model_input()` 组装 system prompt、summary、context、tool schemas
+2. `_call_model()` 执行模型调用，支持重试、fallback model 和 `on_model_call` middleware
+3. 将 `ChatResponse` 或 streaming chunks 转为 `ModelCallStart/End`、Text/Thinking/Tool/Data block events，并把 completed response 保存进 context
 
-## 关键代码路径
+若模型最终没有生成 `ToolCallBlock`，`_reasoning_impl()` 直接产出最终 `AssistantMsg`，主循环结束。
 
-### 路径 1：完整 ReAct 主循环
+源码依据：
 
-```
-agent(msg)                           # AgentBase.__call__
-  └─ await self.reply(msg)           # _wrap_with_hooks 包装后的 reply
-       └─ ReActAgent.reply(msg)
-            ├─ await memory.add(msg)
-            ├─ await _retrieve_from_long_term_memory(msg)
-            ├─ await _retrieve_from_knowledge(msg)
-            └─ for _ in range(max_iters):
-                 ├─ await _compress_memory_if_needed()
-                 ├─ msg_r = await self._reasoning(tool_choice)
-                 │    ├─ prompt = await formatter.format([sys, *memory.get_memory()])
-                 │    ├─ res = await self.model(prompt, tools=toolkit.get_json_schemas(), tool_choice=tool_choice)
-                 │    ├─ async for chunk in res:   # streaming
-                 │    │    └─ await self.print(msg, last=False)
-                 │    ├─ await self.print(msg, last=True)
-                 │    └─ await memory.add(msg)
-                 ├─ futures = [self._acting(tc) for tc in msg_r.get_content_blocks("tool_use")]
-                 ├─ structured_outputs = await asyncio.gather(*futures)  # parallel
-                 │    or [await f for f in futures]                       # sequential
-                 └─ if not msg_r.has_content_blocks("tool_use"): break   # exit condition
-```
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/agent/_agent.py:707` — `_reasoning_impl()`
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/agent/_agent.py:2236` — `_prepare_model_input()`
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/agent/_agent.py:2265` — `_call_model()` 重试/fallback/middleware
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/agent/_agent.py:779` — `ModelCallEndEvent`
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/agent/_agent.py:789` — 保存 completed response 到 context
 
-### 路径 2：_acting 工具执行
+### Acting 拆成 permission / execution / context 三层
 
-```python
-# agent/_react_agent.py
-async def _acting(self, tool_call: ToolUseBlock) -> dict | None:
-    tool_res = await self.toolkit.call_tool_function(tool_call)
-    async for chunk in tool_res:
-        tool_res_msg.content[0]["output"] = chunk.content
-        await self.print(tool_res_msg, chunk.is_last)
-        if chunk.is_interrupted:
-            raise asyncio.CancelledError()
-    await self.memory.add(tool_res_msg)
-    # 若是 generate_response 且验证通过，返回 structured_output
-    if tool_call["name"] == self.finish_function_name and chunk.metadata["success"]:
-        return chunk.metadata.get("structured_output")
-    return None
-```
+`_execute_tool_call()` 包办 tool lifecycle：
 
-### 路径 3：中断处理（Realtime Steering）
+- 校验工具是否可用
+- 用 tool schema 解析并校验输入
+- 调 `PermissionEngine.check_permission()`
+- 需要用户确认时产出 `RequireUserConfirmEvent`
+- 外部工具产出 `RequireExternalExecutionEvent`
+- 允许执行时产出 `ToolResultStartEvent`
+- 调 `_acting()` 执行工具
+- 将 tool chunk 转成流式事件
+- 对最终 `ToolResponse` 做 tool-result compression/offload
+- 写 context，并把 tool call state 改为 `FINISHED`
 
-```python
-# AgentBase.__call__
-try:
-    reply_msg = await self.reply(*args, **kwargs)
-except asyncio.CancelledError:
-    reply_msg = await self.handle_interrupt(*args, **kwargs)
+`_acting()` 本身只包裹 `toolkit.call_tool()`，是 `on_acting` middleware 的 hook point。permission checking、input validation、context writes 都在 `_execute_tool_call()` 外层，避免 middleware 背景化执行时直接写 agent context。
 
-# 外部触发中断
-async def interrupt(self, msg=None) -> None:
-    if self._reply_task and not self._reply_task.done():
-        self._reply_task.cancel(msg)
-```
+源码依据：
 
-### 路径 4：记忆压缩触发
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/agent/_agent.py:1311` — `_execute_tool_call()`
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/agent/_agent.py:1437` — permission ASK/PASSTHROUGH
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/agent/_agent.py:1487` — external tool 暂停
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/agent/_agent.py:1502` — `_acting()` hook point
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/agent/_agent.py:1570` — tool result 写 context 并结束
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/agent/_agent.py:1612` — `_acting()` middleware wrapper
 
-```python
-# agent/_react_agent.py
-async def _compress_memory_if_needed(self):
-    to_compressed = await self.memory.get_memory(exclude_mark=_MemoryMark.COMPRESSED)
-    prompt = await formatter.format([sys, *to_compressed])
-    n_tokens = await compression_config.agent_token_counter.count(prompt)
-    if n_tokens > compression_config.trigger_threshold:
-        res = await compression_model(compression_prompt, structured_model=SummarySchema)
-        await memory.update_compressed_summary(summary_template.format(**res.metadata))
-        await memory.update_messages_mark(msg_ids, new_mark=_MemoryMark.COMPRESSED)
-```
+### Tool Call Batch 由工具属性决定
 
-### 路径 5：Stream 消息暴露（pipeline）
+`_batch_tool_calls()` 会读取 tool metadata：
 
-```python
-# pipeline/_functional.py
-async def stream_printing_messages(agents, coroutine_task, queue=None, ...):
-    queue = queue or asyncio.Queue()
-    for agent in agents:
-        agent.set_msg_queue_enabled(True, queue)
-    task = asyncio.create_task(coroutine_task)
-    task.add_done_callback(lambda _: queue.put_nowait(end_signal))
-    while True:
-        printing_msg = await queue.get()
-        if printing_msg == end_signal:
-            break
-        yield msg, last
-```
+- 找不到 tool 或 tool 标记 `is_concurrency_safe=True` → 放入 concurrent batch
+- 否则放入 sequential batch
+
+concurrent 执行使用 `asyncio.gather(return_exceptions=True)`，同时通过 shared queue 把各 tool 的事件流持续吐出；gather 完成后再统一收集异常并抛 `ExceptionGroup`。
+
+源码依据：
+
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/agent/_agent.py:1034` — `_batch_tool_calls()`
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/agent/_agent.py:1078` — sequential execution
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/agent/_agent.py:1130` — concurrent execution
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/agent/_agent.py:1219` — `asyncio.gather(..., return_exceptions=True)`
+
+### Middleware 是当前扩展机制
+
+`MiddlewareBase` 支持：
+
+- `on_reply`
+- `on_reasoning`
+- `on_acting`
+- `on_model_call`
+- `on_compress_context`
+- `on_system_prompt`
+
+前五个是 onion pattern：middleware 调 `next_handler()` 包裹后续链路；`on_system_prompt` 是 transformer pattern，按顺序修改 prompt string。
+
+源码依据：
+
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/middleware/_base.py:13` — middleware hook 总览
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/middleware/_base.py:65` — `on_reply`
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/middleware/_base.py:92` — `on_reasoning`
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/middleware/_base.py:114` — `on_acting`
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/middleware/_base.py:160` — `on_model_call`
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/middleware/_base.py:208` — `on_system_prompt`
 
 ---
 
 ## 设计亮点
 
-### 1. 元类注入 Hook，零侵入全链路拦截
+### 1. Event-first query loop
 
-用 `_AgentMeta` / `_ReActAgentMeta` 在类定义时（非实例化时）替换目标方法，开发者继承后无需任何额外调用，pre/post hook 自动生效。Hook 同时支持类级（所有实例共享）和实例级两种粒度，且执行顺序确定（instance hooks 优先于 class hooks）。
+Agent loop 不只返回最终文本，而是把 model call、text/thinking/tool/data block、tool result、confirmation、external execution、reply start/end 都转成结构化事件。Web/SSE、日志、trace、UI 可以共享同一份事件语义。
 
-### 2. `__call__` 与 `reply` 分离——中断点设计
+### 2. 外部确认/外部执行是 loop 原生状态
 
-将"是否 cancelled"和"广播订阅者"逻辑放在 `__call__` 而非 `reply`，使 `reply` 只关注生成逻辑。外部任何时候调用 `agent.interrupt()` 取消 asyncio task，`CancelledError` 被 `__call__` 捕获后调用 `handle_interrupt`，原始请求参数仍然可访问，支持定制化中断响应（如生成"我注意到你打断了我"这类消息）。
+`UserConfirmResultEvent` 和 `ExternalExecutionResultEvent` 不是旁路 API，而是 `reply_stream(inputs)` 的合法输入类型。agent 可在工具确认或外部执行时暂停，下一次 run 用事件恢复。
 
-### 3. thinking block 的自动剥除
+### 3. 并发工具调用受 tool metadata 控制
 
-`_broadcast_to_subscribers` 在广播前调用 `_strip_thinking_blocks`，确保 chain-of-thought 内容不会泄露给其他 agent，保持推理的私密性，不需要开发者手动过滤。
+并发不是单纯“LLM 一次生成多个 tool 就全部 gather”。AgentScope 会按 `is_concurrency_safe` 分 batch，把有副作用或不可并发的工具串行化。这比完全依赖 LLM 自觉更稳。
 
-### 4. 并发工具调用（parallel_tool_calls）
+### 4. Context / tool result 压缩在 loop 内部
 
-当 LLM 在一次 reasoning 中输出多个 tool_use block 时，`parallel_tool_calls=True` 会用 `asyncio.gather` 并发执行所有工具，而非逐个等待。对于独立工具（如多次文件读取）可显著降低延迟。
+reasoning 前调用 `compress_context()`，tool result 写入前调用 `_split_tool_result_for_compression()`。大输出会被截断，并可通过 offloader 保存剩余内容，避免 tool result 直接冲爆上下文。
 
-### 5. 结构化输出通过 tool_use 实现（generate_response trick）
+### 5. Middleware 替代旧元类 hook
 
-需要结构化输出时，AgentScope 不依赖模型的原生 structured output API（各家不统一），而是动态注册一个 `generate_response` 工具函数，用 Pydantic 模型描述 schema，强制 `tool_choice="required"` 让 LLM 调用该工具，工具执行时做 `model_validate` 校验，失败时写回错误信息继续迭代。这种方式在所有支持 function calling 的模型上均可工作。
-
-### 6. 记忆压缩内置在循环里
-
-`_compress_memory_if_needed` 在每次 reasoning 之前调用，而非在 reply 结束后。这意味着超长对话中途就会触发压缩，不需要等到 context 溢出。压缩结果用 `_MemoryMark.COMPRESSED` 标记，原始消息保留但在 `get_memory` 时被过滤掉，换成 summary 替代，兼顾可追溯性与窗口控制。
-
-### 7. stream_printing_messages 解耦流式输出
-
-通过 asyncio.Queue 将 agent 内部的每次 `print()` 调用转换为外部可消费的异步生成器，不需要修改 agent 逻辑即可实现 SSE/WebSocket 推送。调用方只需 `async for msg, last in stream_printing_messages(agents, task)` 即可获取实时中间消息。
+当前扩展点是显式 middleware 列表，而不是类级全局 hook/metaclass 注入。这样更容易按 session/user 注入审计、tool offload、inbox、trace、system prompt 修改等能力。
 
 ---
 
 ## 局限性
 
-### 1. 循环终止条件过于简单
+### 1. 终止语义仍主要依赖“无 tool call”
 
-退出条件是"没有 tool_use block"，即 LLM 输出纯文本时退出。这在理论上正确，但没有语义检查（例如 LLM 是否真的完成了任务还是只是卡住了）。`max_iters` 是唯一的安全阀，超出后调用 `_summarizing()` 生成一个强制性总结，但这个总结质量无法保证。
+主循环在模型没有生成 tool call 时结束；是否真的完成任务仍由模型输出质量决定。`max_iters` 是硬上限，不是语义完成判定。
 
-### 2. 结构化输出依赖 function calling，不支持纯文本模型
+### 2. concurrent batch 不表达工具依赖图
 
-`generate_response` trick 要求模型支持 tool_use / function calling。对于不支持工具的模型（如某些开源模型），结构化输出路径完全不可用。
+`is_concurrency_safe` 只说明工具是否安全并发，不说明工具调用之间的数据依赖。如果模型一次生成依赖链工具调用，框架无法自动推导 DAG，只能靠工具 metadata 和 prompt 约束。
 
-### 3. 记忆压缩在循环内部会增加额外的 LLM 调用延迟
+### 3. 外部确认会暂停整个 run
 
-`_compress_memory_if_needed` 在每次 reasoning 前都检查一次，一旦触发会增加一次完整的 LLM 调用。在高频低延迟场景（如对话系统）中，这可能造成明显的卡顿，且目前没有异步后台压缩的设计。
+遇到 `RequireUserConfirmEvent` 或 `RequireExternalExecutionEvent` 后，当前 `_reply_impl()` 返回等待消息。这个设计利于恢复，但也意味着一个需要确认的工具会阻塞后续 batch。
 
-### 4. parallel_tool_calls 缺乏依赖感知
+### 4. state-injected 工具的后台 offload 仍有风险
 
-`asyncio.gather` 并发执行所有工具，但工具之间如果有依赖关系（如 tool B 需要 tool A 的输出），框架本身无法检测，只能依赖 LLM 在生成工具调用时自行保证顺序。
+源码注释指出，`is_state_injected=True` 的工具会拿到 live `agent.state`；若被 `on_acting` middleware offload 到后台任务，可能产生并发状态修改风险。agent-os 如果实现 tool offload，需要明确禁止或序列化 state-injected tools。
 
-### 5. MsgHub 的广播是全量 observe，无过滤机制
+---
 
-MsgHub 中每个 agent 的 reply 都会 broadcast 给所有其他参与者，缺乏内容过滤或路由机制。在大型多 agent 场景中，无关信息会累积进所有 agent 的 memory，增加无效 context。
+## 对 agent-os 的借鉴
 
-### 6. 全局类级 hook 共享状态，测试隔离困难
+P0：query loop 应先产出结构化事件，再由 channel 决定如何显示。不要把 CLI 文本流、Web SSE、trace 三套输出做成三套逻辑。
 
-`_class_pre_reply_hooks` 等字典是类变量，所有实例共享。在测试或多租户场景中注册的 class hook 会影响所有 instance，需要手动调用 `clear_class_hooks()` 清理，容易遗漏。
+P0：确认/外部执行/后台任务完成都应是 loop 的可恢复输入事件，而不是 handler 里直接改数据库。这样本地 agent 和 Web agent 可以共享恢复机制。
+
+P1：tool metadata 至少包含 `is_concurrency_safe`、`is_external_tool`、`is_state_injected` 三类决策信息。它们直接影响 batch、permission、offload 和恢复策略。
+
+P1：middleware 比继承 hook 更适合产品化 agent-os。local shell 可以注入轻量 tracing；Web shell 可以注入 inbox、state-change publish、tool offload、tenant audit。
+
+P1：context compression 和 tool-result offload 应进入 loop 的固定生命周期点，而不是作为“出问题后补救”的外部清理任务。
 
 ---
 
 ## 来源
 
-- 源码版本：0ff492c3508e532d2a33234dfe4a299833ce866c 2026-04-12
+- 源码版本：`v2.0.1-11-g0e5418e8`
 - 分析深度：源码级
 - 核心文件：
-  - `src/agentscope/agent/_agent_base.py` — AgentBase、__call__、hook 注册、broadcast
-  - `src/agentscope/agent/_agent_meta.py` — _AgentMeta、_ReActAgentMeta、_wrap_with_hooks
-  - `src/agentscope/agent/_react_agent_base.py` — ReActAgentBase、reasoning/acting 抽象接口
-  - `src/agentscope/agent/_react_agent.py` — ReActAgent、reply 主循环、_reasoning、_acting、压缩、RAG
-  - `src/agentscope/pipeline/_functional.py` — sequential_pipeline、fanout_pipeline、stream_printing_messages
-  - `src/agentscope/pipeline/_class.py` — SequentialPipeline、FanoutPipeline
-  - `src/agentscope/pipeline/_msghub.py` — MsgHub、auto-broadcast
-  - `src/agentscope/model/_model_base.py` — ChatModelBase、tool_choice 验证
+  - `/Users/neo/Desktop/project/git/agentscope/src/agentscope/agent/_agent.py`
+  - `/Users/neo/Desktop/project/git/agentscope/src/agentscope/state/_state.py`
+  - `/Users/neo/Desktop/project/git/agentscope/src/agentscope/middleware/_base.py`
+  - `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/_service/_chat.py`
+  - `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/middleware/`

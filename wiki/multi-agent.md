@@ -3,7 +3,7 @@ title: Multi-Agent
 aliases: [多智能体, multi-agent orchestration, task delegation]
 category: L1
 created: 2026-04-06
-updated: 2026-04-25
+updated: 2026-06-09
 relations:
   - target: "[[query-loop]]"
     type: uses
@@ -11,11 +11,11 @@ relations:
     type: uses
   - target: "[[memory-system]]"
     type: depends_on
-    note: "MsgHub 广播依赖 AgentBase 的 observe() 将消息写入 memory；PlanNotebook 的计划状态本质是结构化 working memory"
+    note: "多 agent 协作需要把 team worker、主 agent、工具链历史和 workspace 状态隔离；AgentScope Python 2.x 用 session/context/tasks_context 承载这类状态"
   - target: "[[tool-system]]"
     type: depends_on
-    note: "PlanNotebook 将计划管理能力封装为 tool set（StateModule），agent 通过 tool call 驱动子任务状态机；这是'工具化状态机'模式的典型实现"
-sources: [claude-code, openharness, mirofish, deer-flow, hermes-agent, agentscope]
+    note: "AgentScope Python 2.x 把 TeamCreate / AgentCreate / TeamSay / TeamDelete 作为 team tools 暴露给 leader，worker 只拿 TeamSay；多 agent 编排实际由工具系统承接"
+sources: [claude-code, openharness, mirofish, deer-flow, hermes-agent, agentscope, agentscope-java]
 ---
 
 ## 一句话定义
@@ -33,10 +33,10 @@ sources: [claude-code, openharness, mirofish, deer-flow, hermes-agent, agentscop
 
 | 维度 | Claude Code | OpenHarness | MiroFish | DeerFlow | Hermes Agent | AgentScope |
 |------|------------|-------------|----------|----------|-------------|-----------|
-| 核心设计 | 建立在正式任务系统之上的 agent orchestration runtime：每个子 agent 拥有独立执行环境、专属 MCP servers 和独立 transcript，通过 `AgentTool` 作为统一标准化入口被调度 | 以操作系统进程为隔离边界：每个子 agent 是独立的 `python -m openharness --headless` 子进程，以 UTF-8 文本行为通信协议；`BackgroundTaskManager` 负责进程生命周期，`SendMessageTool` 向子进程 stdin 写消息；核心逻辑约 280 行 | 环境介导通信——数百 agent 通过共享社交环境间接交互，行动即通信 | `task` 工具将主 agent 升级为 lead agent，子任务交给独立的 SubagentExecutor 实例在线程池中异步并行运行；双线程池（scheduler + execution）混合 async 事件循环；ACP 协议桥接外部 agent（Codex、Claude Code）纳入调度 | `delegate_task` 为统一入口，支持单任务（主线程直接运行）和批量并行（`ThreadPoolExecutor` 最多 3 个子 agent）两种模式；深度上限 `MAX_DEPTH=2`，超限立即拒绝；`frozenset` 白名单在代码层面剥除子 agent 的危险工具；ACP 传输支持委托给异构 agent（Claude CLI、Copilot） | 三正交抽象：`pipeline`（编排拓扑）+ `MsgHub`（广播总线）+ `A2AAgent`（跨进程透明代理）。pipeline 分 SequentialPipeline / FanoutPipeline 两种原语；MsgHub 为异步上下文管理器，自动注入/清除订阅关系；A2AAgent 继承 AgentBase，使远程 agent 对编排层完全透明；`PlanNotebook` 模块为单 agent 提供可工具化调用的子任务状态机 |
-| 关键特点 | 任务系统先于多智能体（子 agent 结果包装为持久化 task）；拓扑弹性（同进程/tmux 多进程/远程 backend 透明切换）；Coordinator 作为一等公民（专用 system prompt + 工具集约束） | 零依赖隔离（子进程天然隔离，无共享内存、无锁）；极简通信协议（UTF-8 文本行，任何语言可互操作）；broken pipe 检测后自动重启子进程，提升长时任务稳定性 | 去中心化共识涌现；Zep 时序图谱做共享记忆；双平台并行模拟 | 线程池 + async 混合实现真并行；ACP 协议将外部 agent 系统纳入子 agent 调度；stream 事件实时透传子任务进度；SubagentLimitMiddleware 中间件限流（单次 model response 最多 3 个并发 task） | 父子 agent 各有独立 `IterationBudget`（父 90 次，子 50 次，不共享扣减）；所有子 agent 在主线程串行构造后再并发执行（消除全局变量竞态）；`interrupt()` 通过 `_active_children` 线程安全地级联传播到所有深度；`mixture_of_agents_tool` 作为纯推理合成的补充路径（arXiv:2406.04692） | `async with MsgHub(...)` 自动管理订阅生命周期，退出时清除，防止消息跨轮泄露；`fanout_pipeline` 对每个 agent 深拷贝消息，天然并发安全；A2A 标准化（Google A2A 协议）使远程 agent 与本地 agent 接口一致，服务发现支持文件/Well-Known/Nacos 三策略；`DefaultPlanToHint` 将执行状态机外置为差异化 Prompt，根据子任务状态生成引导提示 |
-| 局限 | Coordinator 模式目前是单机的，缺乏真正的分布式协调；agent 间通过 mailbox（异步写文件）通信，延迟较高 | `TeamRecord` 仅存于内存，进程重启后团队关系丢失；单向消息通信，子 agent 无法主动回调协调者；无结果合并机制，子 agent 产出仅写入日志文件 | 重基础设施依赖；无法保证收敛；固定轮次终止 | 无递归嵌套（子 agent 不能再派发子 agent）；无 peer-to-peer 通信；5 秒轮询延迟；子 agent 无持久状态（每次 task 调用创建全新实例） | 父 agent 委托期间同步阻塞（无法处理并发输入）；`MAX_DEPTH=2` 硬编码不可配置；子 agent 无法向父 agent 实时反馈（`clarify`/`send_message` 均被封锁）；批量任务超过 3 个时超出部分直接静默丢弃 | A2A 协议仅支持双角色（user/assistant），跨 agent 对话历史无法原生传递；MsgHub 广播粒度是全员，无法选择性路由（如 A 只发给 B）；PlanNotebook 子任务严格串行（前序全完成才可激活下一个），无法并行；InMemoryPlanStorage 无持久化，重启丢失；ChatRoom 与 RealtimeAgent 强绑定，普通 LLM agent 不可用 |
-| **分布式就绪度** | ❌ **单机**——官方明确承认"Coordinator 目前单机，缺乏真正分布式协调"；`CLAUDE_CODE_COORDINATOR_MODE` 要求所有节点共享同一配置，mailbox 走文件系统（无跨机方案）。详见 [[agent-registry-discovery]] | ❌ **单机**——子进程天然单机边界；`TeamRecord` 内存字典进程重启丢失；无服务发现、无心跳、无跨机通信协议 | 🟡 **半分布式**——agent 通过环境介导（Zep 时序图谱）共享状态，理论上 Zep 可集群；但无正式 agent-to-agent 协议、无版本管理、无故障恢复机制 | 🟡 **单机多进程**——文档提及"Postgres 模式：生产多实例部署"（`runtime-state--deer-flow.md:46`），但主 agent 和子 agent 之间仅通过 `_background_tasks` 进程内字典，**跨节点协同未实现** | ❌ **单机**——`ThreadPoolExecutor` 本地线程池；官方承认"Cron 无法水平扩展"；`_active_children` 线程安全但仅进程内 | ✅ **分布式就绪**——A2A 协议原生跨进程；Nacos 服务发现支持生产多节点；MsgHub 广播总线可跨 node（只要底层 A2A 通道连通）；唯一限制是 InMemoryPlanStorage 无持久化，需外接数据库 |
+| 核心设计 | 建立在正式任务系统之上的 agent orchestration runtime：每个子 agent 拥有独立执行环境、专属 MCP servers 和独立 transcript，通过 `AgentTool` 作为统一标准化入口被调度 | 以操作系统进程为隔离边界：每个子 agent 是独立的 `python -m openharness --headless` 子进程，以 UTF-8 文本行为通信协议；`BackgroundTaskManager` 负责进程生命周期，`SendMessageTool` 向子进程 stdin 写消息；核心逻辑约 280 行 | 环境介导通信——数百 agent 通过共享社交环境间接交互，行动即通信 | `task` 工具将主 agent 升级为 lead agent，子任务交给独立的 SubagentExecutor 实例在线程池中异步并行运行；双线程池（scheduler + execution）混合 async 事件循环；ACP 协议桥接外部 agent（Codex、Claude Code）纳入调度 | `delegate_task` 为统一入口，支持单任务（主线程直接运行）和批量并行（`ThreadPoolExecutor` 最多 3 个子 agent）两种模式；深度上限 `MAX_DEPTH=2`，超限立即拒绝；`frozenset` 白名单在代码层面剥除子 agent 的危险工具；ACP 传输支持委托给异构 agent（Claude CLI、Copilot） | Python 2.x：服务化 session + workspace + MessageBus + team tools。`AgentCreate` 创建 team worker 并继承 leader workspace/model；leader 拿 TeamCreate/AgentCreate/TeamSay/TeamDelete，worker 只拿 TeamSay。AgentCard/A2A/Nacos 属于独立 `agentscope-java` 源 |
+| 关键特点 | 任务系统先于多智能体（子 agent 结果包装为持久化 task）；拓扑弹性（同进程/tmux 多进程/远程 backend 透明切换）；Coordinator 作为一等公民（专用 system prompt + 工具集约束） | 零依赖隔离（子进程天然隔离，无共享内存、无锁）；极简通信协议（UTF-8 文本行，任何语言可互操作）；broken pipe 检测后自动重启子进程，提升长时任务稳定性 | 去中心化共识涌现；Zep 时序图谱做共享记忆；双平台并行模拟 | 线程池 + async 混合实现真并行；ACP 协议将外部 agent 系统纳入子 agent 调度；stream 事件实时透传子任务进度；SubagentLimitMiddleware 中间件限流（单次 model response 最多 3 个并发 task） | 父子 agent 各有独立 `IterationBudget`（父 90 次，子 50 次，不共享扣减）；所有子 agent 在主线程串行构造后再并发执行（消除全局变量竞态）；`interrupt()` 通过 `_active_children` 线程安全地级联传播到所有深度；`mixture_of_agents_tool` 作为纯推理合成的补充路径（arXiv:2406.04692） | MessageBus 提供 session 级分布式锁、event replay、live fan-out；workspace/permission context 成为 team worker 的执行边界；custom subagent templates/custom agent class 从 app factory 注入；Java 线补上 AgentCard/A2A/Nacos 的跨进程注册发现 |
+| 局限 | Coordinator 模式目前是单机的，缺乏真正的分布式协调；agent 间通过 mailbox（异步写文件）通信，延迟较高 | `TeamRecord` 仅存于内存，进程重启后团队关系丢失；单向消息通信，子 agent 无法主动回调协调者；无结果合并机制，子 agent 产出仅写入日志文件 | 重基础设施依赖；无法保证收敛；固定轮次终止 | 无递归嵌套（子 agent 不能再派发子 agent）；无 peer-to-peer 通信；5 秒轮询延迟；子 agent 无持久状态（每次 task 调用创建全新实例） | 父 agent 委托期间同步阻塞（无法处理并发输入）；`MAX_DEPTH=2` 硬编码不可配置；子 agent 无法向父 agent 实时反馈（`clarify`/`send_message` 均被封锁）；批量任务超过 3 个时超出部分直接静默丢弃 | Python 2.x 当前源码未包含旧版 `pipeline/MsgHub/A2AAgent` 路径；team worker 仍由 leader session/tool 驱动，不是 peer-to-peer agent mesh；Local workspace manager 未用 `user_id` 参与 workdir 隔离 |
+| **分布式就绪度** | ❌ **单机**——官方明确承认"Coordinator 目前单机，缺乏真正分布式协调"；`CLAUDE_CODE_COORDINATOR_MODE` 要求所有节点共享同一配置，mailbox 走文件系统（无跨机方案）。详见 [[agent-registry-discovery]] | ❌ **单机**——子进程天然单机边界；`TeamRecord` 内存字典进程重启丢失；无服务发现、无心跳、无跨机通信协议 | 🟡 **半分布式**——agent 通过环境介导（Zep 时序图谱）共享状态，理论上 Zep 可集群；但无正式 agent-to-agent 协议、无版本管理、无故障恢复机制 | 🟡 **单机多进程**——文档提及"Postgres 模式：生产多实例部署"（`runtime-state--deer-flow.md:46`），但主 agent 和子 agent 之间仅通过 `_background_tasks` 进程内字典，**跨节点协同未实现** | ❌ **单机**——`ThreadPoolExecutor` 本地线程池；官方承认"Cron 无法水平扩展"；`_active_children` 线程安全但仅进程内 | 🟡/✅ **生态分层**——Python 2.x 对 Web session、Redis lock、workspace/team runtime 分布式友好；真正 AgentCard/A2A/Nacos 跨进程 registry 在 `agentscope-java`，见 [[agent-registry-discovery--agentscope-java]] |
 
 ## 设计权衡
 
@@ -66,6 +66,9 @@ sources: [claude-code, openharness, mirofish, deer-flow, hermes-agent, agentscop
 
 **如果是固定的多阶段工作流 → 流水线**
 阶段间职责清晰（调研/写作/审查），每个 agent 专注单一角色。代价是串行延迟叠加，前一阶段的错误会被放大传递到后面。
+
+**如果目标是大型分布式 agent 平台 → 先拆三层 ABC**
+AgentScope 的启发不是“直接上一个大框架”，而是把 `SessionRuntime`、`Workspace/PermissionContext`、`AgentRegistry` 分开。Python 2.x 证明 session/workspace/message-bus/team tools 应该是 Web runtime 核心；AgentScope Java 证明跨进程 agent 应暴露 AgentCard/A2A/Nacos 这类注册发现协议。agent-os 同时支持本地代理和 Web 分布式 agent 时，本地实现可用进程内 registry，Web 实现再接 DB/k8s/Nacos。
 
 ### 常见陷阱
 
@@ -101,3 +104,5 @@ sources: [claude-code, openharness, mirofish, deer-flow, hermes-agent, agentscop
 - [[multi-agent--mirofish]]
 - [[multi-agent--deer-flow]]
 - [[multi-agent--hermes-agent]]
+- [[multi-agent--agentscope]]
+- [[agent-registry-discovery--agentscope-java]]

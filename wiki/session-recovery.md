@@ -3,7 +3,7 @@ title: Session Recovery
 aliases: [会话恢复, checkpoint, fault tolerance]
 category: L1
 created: 2026-04-06
-updated: 2026-04-15
+updated: 2026-06-10
 relations:
   - target: "[[runtime-state]]"
     type: uses
@@ -11,10 +11,10 @@ relations:
     type: extends
   - target: "[[tool-system]]"
     type: depends_on
-    note: "AgentScope Toolkit 继承 StateModule，工具激活状态（active_groups）参与 session 序列化；工具集状态的完整恢复依赖 tool-system 的状态定义"
+    note: "AgentScope 2.x 将工具组激活状态保存到 AgentState.tool_context.activated_groups；session 恢复后 Toolkit 每轮重建，因此完整恢复依赖 tool-system 的稳定工具组定义"
   - target: "[[memory-system]]"
     type: depends_on
-    note: "AgentScope InMemoryMemory 继承 StateModule 并重写 state_dict，memory 内容是 session 序列化的核心负载；memory 结构的变化（如压缩摘要字段）直接影响 session recovery 的完整性"
+    note: "AgentScope 2.x 没有内置跨会话长期 memory；SessionRecord.state 中的 summary/context/tool cache 只承担 session-local recovery，长期 memory 需要外接系统"
 sources: [claude-code, openharness, deer-flow, hermes-agent, agentscope]
 ---
 
@@ -32,9 +32,9 @@ Agent 断了怎么办 — checkpoint 保存、状态恢复、容错机制。
 
 | 维度 | Claude Code | OpenHarness | DeerFlow | Hermes Agent | AgentScope |
 |------|------------|-------------|----------|-------------|------------|
-| 核心设计 | 恢复"工作现场"而非重放聊天记录：将 file history、attribution state、context collapse 状态、worktree session、agent type、cost state 等完整 runtime state 持久化，跨进程重启后从中断点继续工作 | 以纯 JSON 文件为存储介质，每个 user turn 结束后自动快照完整会话状态（含完整 messages 列表、usage 统计、80 字符摘要），支持 `--continue`（恢复最近）和 `--resume`（恢复指定）两个 CLI 标志；整个实现仅 178 行 | 持久化完全委托给 LangGraph checkpointer（支持内存/SQLite/Postgres 三档），每个 agent 步骤完成后自动保存 ThreadState（包含消息历史、沙箱状态、产物、todos），恢复只需传入相同 `thread_id`，agent 自身零代码实现 session recovery | 以单文件 SQLite WAL 为核心存储，将消息、推理链、成本统计全部结构化持久化；最大特色是**压缩触发的 session 分裂**——`_compress_context()` 将旧 session 标记为 `ended`、生成新 session ID，并通过 `parent_session_id` 外键维系链式谱系；Gateway 层提供可配置的 `SessionResetPolicy`（none/idle/daily/both），对多平台（Telegram/Discord/Slack 等）实现差异化生命周期管理 | 以「StateModule 树序列化 + 可插拔存储后端」为核心：所有需持久化的 agent 状态（内存、系统提示、计划、工具激活状态）统一继承 `StateModule`，通过 `state_dict()` / `load_state_dict()` 协议递归序列化；`SessionBase` 定义统一存储接口，提供三种后端（JSON 文件、Redis、Alibaba Tablestore），单次 `save_session_state` / `load_session_state` 调用可批量保存或恢复任意数量 agent 的完整状态 |
-| 关键特点 | 交互模式与 headless 模式共享同一套恢复逻辑（`processResumedConversation` 统一协调）；worktree 恢复用 `process.chdir()` 做 TOCTOU-safe 存在性检查；fork session 时提前 seed content-replacement 记录防止 tool_use_id 匹配失败 | 人类可读存储（纯 JSON，无 SQLite、无二进制格式，可直接用文本编辑器查看）；天然可移植（JSON 文件可直接拷贝跨机器迁移）；`export_session_markdown()` 支持将会话导出为 Markdown 归档 | 零代码持久化（agent 逻辑完全不涉及存储细节）；per-step checkpoint（每个 tool call/model call 完成后立即保存，粒度细于 per-turn）；三档切换无缝（只改配置文件）；Postgres 支持横向扩展 | CLI resume 两阶段加载（`_preload_resumed_session()` 提前展示历史，`_init_agent()` 检测到 `conversation_history` 非空则跳过重复 DB 查询）；v6 schema 新增 `reasoning / reasoning_details / codex_reasoning_items` 三列，保证推理型 provider 恢复后多轮推理上下文连续；FTS5 全文索引自动随写入同步，支持跨会话历史检索 | 借鉴 PyTorch `state_dict()` / `load_state_dict()` 范式，对 ML 背景开发者零学习成本；`register_state(attr, custom_to_json, custom_from_json)` 支持任意不可 JSON 序列化对象（Pydantic、dataclass、enum）注入自定义序列化钩子；Redis 后端使用 `GETEX` 原子操作实现滑动 TTL（活跃用户不过期、不活跃自动清理）；`allow_not_exist=True` 默认值实现冷启动-热启动统一路径；`**state_modules_mapping` 批量操作减少多 agent 场景下的网络 IO 次数 |
-| 局限 | context collapse 恢复依赖 feature flag；coordinator 模式不匹配只报 warning 不强制中断；worktree 被删除后静默降级不告知用户 | Session ID 每次调用生成新 uuid，无法跨生命周期保持稳定标识；仅 turn 间快照，turn 执行中途崩溃无法恢复；无命名会话，只能通过 id 或"最近"定位 | Checkpoint 不透明（序列化格式不可读，调试困难）；无人类可读导出；存储无限增长（无自动 TTL 或清理）；跨 checkpointer 迁移难 | **轮末刷写**（非每步追加）：`_flush_messages_to_session_db()` 在 turn 结束时批量写入，进程在 tool 执行中途被 kill 会丢失当轮全部消息；压缩分裂失败不回滚，旧 session 已被 `end_session` 但新 session 未创建，后续写入会进入错误 session；gateway reset policy 状态依赖进程内 `sessions.json`，不在 SQLite 中，进程重启后需重新加载 | 全量覆盖式持久化，无增量 diff，大 memory 的 agent 每次保存开销线性增加；无内置 checkpoint 机制，依赖调用方手动触发 save；`register_state()` 需手动声明，遗漏属性不报警告；`strict=True` 下版本迭代新增字段会导致旧存储无法加载，框架层无统一版本迁移机制；Tablestore 后端深耦合阿里云专属 SDK，非阿里云用户无法使用 |
+| 核心设计 | 恢复"工作现场"而非重放聊天记录：将 file history、attribution state、context collapse 状态、worktree session、agent type、cost state 等完整 runtime state 持久化，跨进程重启后从中断点继续工作 | 以纯 JSON 文件为存储介质，每个 user turn 结束后自动快照完整会话状态（含完整 messages 列表、usage 统计、80 字符摘要），支持 `--continue`（恢复最近）和 `--resume`（恢复指定）两个 CLI 标志；整个实现仅 178 行 | LangGraph checkpointer 负责 ThreadState 持久化；Gateway/runtime 在其上叠加 run lifecycle 控制：run 前捕获 checkpoint snapshot，cancel 时 interrupt + rollback，worker/manager 处理 checkpoint restore/delete 与 orphaned inflight run reconciliation | 以单文件 SQLite WAL 为核心存储，将消息、推理链、成本统计全部结构化持久化；最大特色是**压缩触发的 session 分裂**——`_compress_context()` 将旧 session 标记为 `ended`、生成新 session ID，并通过 `parent_session_id` 外键维系链式谱系；Gateway 层提供可配置的 `SessionResetPolicy`（none/idle/daily/both），对多平台（Telegram/Discord/Slack 等）实现差异化生命周期管理 | 服务化 runtime 恢复模型：`StorageBase` 持久化 `SessionRecord.state: AgentState`，`ChatService` 每轮从 storage/workspace/model/tool managers 重建 agent，`MessageBus.session_run()` 用 session 锁串行化执行并提供 SSE replay/live fan-out |
+| 关键特点 | 交互模式与 headless 模式共享同一套恢复逻辑（`processResumedConversation` 统一协调）；worktree 恢复用 `process.chdir()` 做 TOCTOU-safe 存在性检查；fork session 时提前 seed content-replacement 记录防止 tool_use_id 匹配失败 | 人类可读存储（纯 JSON，无 SQLite、无二进制格式，可直接用文本编辑器查看）；天然可移植（JSON 文件可直接拷贝跨机器迁移）；`export_session_markdown()` 支持将会话导出为 Markdown 归档 | Per-step checkpoint 细于 per-turn；三档 checkpointer 无缝切换；Postgres 支持横向扩展；run cancel/rollback 有明确 API 语义，并通过 E2E 测试验证可回到 run 前状态 | CLI resume 两阶段加载（`_preload_resumed_session()` 提前展示历史，`_init_agent()` 检测到 `conversation_history` 非空则跳过重复 DB 查询）；v6 schema 新增 `reasoning / reasoning_details / codex_reasoning_items` 三列，保证推理型 provider 恢复后多轮推理上下文连续；FTS5 全文索引自动随写入同步，支持跨会话历史检索 | Replay log 与持久消息分工清楚：MessageBus 负责 in-flight events/replay/cancel/inbox/wakeup，Storage 负责 SessionRecord/message history；agent 对象不跨请求存活，只保存可恢复 state 和低频 config；Continuation event 通过 `reply_id` 支持待确认/外部执行结果继续 |
+| 局限 | context collapse 恢复依赖 feature flag；coordinator 模式不匹配只报 warning 不强制中断；worktree 被删除后静默降级不告知用户 | Session ID 每次调用生成新 uuid，无法跨生命周期保持稳定标识；仅 turn 间快照，turn 执行中途崩溃无法恢复；无命名会话，只能通过 id 或"最近"定位 | Checkpoint 不透明（序列化格式不可读，调试困难）；无人类可读导出；存储无限增长（无自动 TTL 或清理）；跨 checkpointer 迁移难；rollback 语义依赖 run lifecycle 层正确接管 cancel | **轮末刷写**（非每步追加）：`_flush_messages_to_session_db()` 在 turn 结束时批量写入，进程在 tool 执行中途被 kill 会丢失当轮全部消息；压缩分裂失败不回滚，旧 session 已被 `end_session` 但新 session 未创建，后续写入会进入错误 session；gateway reset policy 状态依赖进程内 `sessions.json`，不在 SQLite 中，进程重启后需重新加载 | `AgentState` 是粗粒度 state，缺少 field-level diff；恢复依赖工具/workspace/model 配置可重建，部署漂移会让旧 session 无法完整继续；MessageBus replay log 是短期事件流，不替代长期事件溯源；本地 workspace manager 的路径隔离弱于 Web 多租户要求 |
 
 ## 设计权衡
 
@@ -58,11 +58,13 @@ Agent 断了怎么办 — checkpoint 保存、状态恢复、容错机制。
 
 **自动化工作流 / 长任务 agent**（如 Claude Code 复杂任务）→ 状态检查点。任务跑几十分钟期间进程可能因网络或资源问题崩溃，必须能从中断点续跑而不是重头来过。关键：检查点要包含 worktree 路径、tool execution state、cost state，仅保存消息历史不够。
 
+**Web/Gateway 长任务 agent**（DeerFlow 新版）→ checkpoint + run lifecycle 控制层。底层 checkpoint 只能回答“状态存在哪里”；产品还必须定义“取消 run 后回滚到哪一个 checkpoint”“orphaned inflight run 如何 reconciliation”“HTTP cancel 返回什么语义”。agent-os 如果同时支持本地代理和 Web 分布式代理，应把 `CheckpointStore` 与 `RunController` 拆成两个 ABC，分别实现 local 与 Web/distributed 版本。
+
 **合规系统 / 需要审计追溯** → 事件溯源。每一步工具调用、模型输出都必须可追溯、可重放、可对账。接受存储和 replay 延迟的代价。
 
-**多 agent 编排系统（如 AgentScope pipeline）** → 模块树序列化（StateModule 协议）。当 session 中同时运行多个 agent（orchestrator + worker1 + worker2），且每个 agent 拥有独立内存、计划、工具集时，逐个 agent 分别调用 save 会产生多次 IO。AgentScope 的 `**state_modules_mapping` 关键字参数设计允许单次调用批量保存所有 agent 状态，对 Redis / Tablestore 等网络后端尤为关键。代码证据：`await session.save_session_state(session_id="user_1", agent1=agent1, agent2=agent2)`（`agentscope/session/_session_base.py`）。与 DeerFlow 的 per-step checkpoint 相比，AgentScope 方案需要调用方手动触发，但批量 IO 优化是 DeerFlow 不具备的。
+**多 agent Web runtime（AgentScope Python 2.x）** → `SessionRecord + MessageBus + wakeup`。team worker 是有独立 `AgentRecord` / `SessionRecord` / `AgentState` 的 hidden agent；leader 发消息时先写 inbox，再 enqueue wakeup。它不是本地对象树快照，而是把 worker 纳入同一套 session lock、event stream、workspace 和 storage 基础设施。agent-os 如果要同时支持本地代理和 Web 分布式 agent，应把 `SessionStore`、`MessageBus`、`WorkspaceManager`、`RunController` 拆成 ABC，再分别实现 local 与 distributed 版本。
 
-**SaaS 多租户 / 用户级 session 有差异化过期策略** → Redis 后端 + 滑动 TTL。活跃用户 session 应保持不过期（每次访问自动续期），不活跃用户 session 自动清理节省内存。AgentScope 的 `RedisSession` 使用 `GETEX` 原子操作（GET + EXPIRE 合并为一条命令），每次 `load_session_state` 自动刷新 TTL，一行代码实现滑动窗口行为，避免 GET 后再 EXPIRE 的竞态条件。代码证据：`data = await client.getex(key, ex=key_ttl)`（`agentscope/session/_redis_session.py:141`）。与 Hermes 的 `SessionResetPolicy`（基于 idle time / daily 等固定策略）相比，AgentScope 的滑动 TTL 更接近标准 web session 行为，适合高频交互用户。注意：此方案无法精确控制「空闲 N 分钟后过期」以外的复杂策略（如跨天重置、平台差异化）。
+**SaaS 多租户 / 同一 session 可能被多个 worker 触发** → session lock + replay/live event bus。AgentScope 2.x 的 `MessageBus.session_run(session_id)` 在运行边界加互斥锁，Redis 实现用 token/heartbeat 防止并发运行同一 session；SSE endpoint 先 replay buffered events 再 live subscribe，前端刷新或重连不会丢当前 run 的事件。注意：replay log 是短期 buffer，长期恢复仍依赖 Storage 的 message/session state。
 
 ### 常见陷阱
 
@@ -80,11 +82,11 @@ Agent 断了怎么办 — checkpoint 保存、状态恢复、容错机制。
 
 **schema 版本演进中的推理链兼容性**：Hermes v6 新增 `reasoning / reasoning_details / codex_reasoning_items` 三列是为了支持推理型 provider（OpenRouter/Nous）的多轮推理上下文重建。如果存储层没有这类字段，这些 provider 在 session 恢复后会丢失推理链，导致表现退化。使用推理型模型的 agent 需要在设计存储 schema 时提前预留推理链字段。
 
-**register_state 遗漏导致状态静默丢失**：AgentScope 的 `StateModule` 要求开发者在构造函数中手动调用 `register_state("attr_name")` 声明哪些属性参与序列化，遗漏声明的属性不会报任何警告——只是不被持久化。恢复后 agent 运行正常但状态不完整（如 plan 丢失但 memory 正常），极难排查。解法：在 agent 初始化后立即调用 `state_dict()` 打印并人工审查所有已注册属性，覆盖率测试中验证 save → load 后各关键字段非空。
+**把 event replay 当长期持久化**：AgentScope 2.x 的 MessageBus replay log 服务 SSE 重连和 live fan-out，锁退出后会 trim；完整历史在 Storage message record，恢复状态在 SessionRecord.state。自建系统若把短期 event buffer 当作唯一事实来源，进程重启或 trim 后会丢审计线索。解法：明确 `EventBus`、`MessageStore`、`CheckpointStore` 三者职责。
 
 ## 相关模式
 
-- [[state-module-tree-serialization]] — 用统一状态树协议降低 session recovery 的手写拼接成本
+- [[state-module-tree-serialization]] — 历史 AgentScope 1.x 模式；2.x 已迁移到 `AgentState + SessionRecord + MessageBus`
 
 ## L2 详情
 

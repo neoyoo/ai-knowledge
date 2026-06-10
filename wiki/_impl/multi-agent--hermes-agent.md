@@ -3,10 +3,10 @@ title: "Multi-Agent — Hermes Agent"
 category: L2
 parent: "[[multi-agent]]"
 source: hermes-agent
-source_version: "0.8.0"
+source_version: "0.16.0"
 confidence: high
 created: 2026-04-08
-updated: 2026-04-08
+updated: 2026-06-10
 ---
 
 ## 概述
@@ -276,6 +276,6 @@ finally:
 
 ## 来源
 
-- 源码版本：hermes-agent v0.8.0
+- 源码版本：hermes-agent 0.16.0
 - 分析文件：`tools/delegate_tool.py`、`run_agent.py`、`tools/mixture_of_agents_tool.py`、`cli-config.yaml.example`
 - 分析深度：源码级

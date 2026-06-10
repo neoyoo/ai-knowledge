@@ -3,15 +3,15 @@ title: "Channel & Remote — Hermes Agent"
 category: L2
 parent: "[[channel-remote]]"
 source: hermes-agent
-source_version: "0.8.0"
+source_version: "0.16.0"
 confidence: high
 created: 2026-04-08
-updated: 2026-04-08
+updated: 2026-06-10
 ---
 
 ## 概述
 
-Hermes Agent 的 Channel & Remote 实现是目前开源 agent 项目中平台覆盖最广、工程化程度最高的多通道网关方案。它以 `GatewayRunner`（`gateway/run.py`）为核心，通过统一的 `BasePlatformAdapter` 接口把 16 个 IM/消息平台统一接入，以 `SessionStore` + `SessionResetPolicy` 管理跨平台会话生命周期，以 `cron/scheduler.py` 实现持久化定时任务投递，并通过 `TERMINAL_ENV` 环境变量在 local/Docker/SSH/Modal/Daytona/Singularity 六种执行后端之间切换。整体设计思路：**平台差异被适配层消化，业务逻辑（会话、路由、安全）集中在 runner 层统一处理**。
+Hermes Agent 的 Channel & Remote 实现是目前开源 agent 项目中平台覆盖最广、工程化程度最高的多通道网关方案。它以 `GatewayRunner`（`gateway/run.py`）为核心，通过统一的 `BasePlatformAdapter` 接口把 16+ 个 IM/消息平台统一接入，以 `SessionStore` + `SessionResetPolicy` 管理跨平台会话生命周期，以 `cron/scheduler.py` 实现持久化定时任务投递，并通过 `TERMINAL_ENV` 环境变量在 local/Docker/SSH/Modal/Daytona/Singularity 六种执行后端之间切换。最新版又补强了 TUI/Desktop 的 route resume、gateway sleep/wake 后的 session rebind，以及 draft/edit/fallback 多层流式投递。整体设计思路：**平台差异被适配层消化，业务逻辑（会话、路由、安全、恢复）集中在 runner/gateway 层统一处理**。
 
 ## 架构分析
 
@@ -83,6 +83,43 @@ retryable: bool  # True = 可重试的瞬态网络错误
 - 裸本地文件路径（绝对路径 + 媒体扩展名）
 
 提取后通过平台原生 API 发送为附件，文本中的路径/标签同时清除。
+
+### 2.5 TUI/Desktop route resume
+
+Hermes 的桌面/TUI 不把 URL route 直接绑定到当前 live runtime id，而是使用持久化 session id，再通过 gateway JSON-RPC 重新绑定：
+
+- `tui_gateway/server.py:3422-3463` — `session.list` deny-list 内部 tool session，面向用户展示所有 human-facing session；
+- `tui_gateway/server.py:3512-3649` — `session.resume` 支持按 id/title 恢复，profile scoped state.db，已有 live session 走 fast path；构造 agent 时释放 resume lock，完成后 double-check 防并发 resume；
+- `apps/desktop/src/app/routes.ts:68-80` — `/:sessionId` 解析为 route session id；
+- `apps/desktop/src/app/session/hooks/use-route-resume.ts:72-104` — route change、gateway became open、stranded routed session 三类情况触发 resume；
+- `use-session-actions.ts:540-590` — 先读本地 snapshot，再调用 gateway `session.resume`，避免刷新时消息列表清空闪烁；
+- `use-prompt-actions.ts:490-510` — `prompt.submit` 遇到 `session not found` 时自动 `session.resume` 并用新的 live id 重试一次。
+
+这条链路解决的是 Web/Desktop agent 常见 split-brain：前端还停在历史 session route，但 gateway 后端重启、profile swap 或 sleep/wake 后 live runtime id 已失效。
+
+### 2.6 Gateway restart resume_pending
+
+Gateway 对长任务 shutdown/restart 做 durable resume marker：
+
+- `gateway/session.py:482-492` — `resume_pending` / `resume_reason` / `last_resume_marked_at` 持久化到 session entry；
+- `gateway/session.py:1004-1050` — `mark_resume_pending()` 与 `clear_resume_pending()`；
+- `gateway/session.py:1110-1144` — startup crash/fast restart 后标记最近活跃 session 为 resumable；
+- `gateway/run.py:4375-4460` — adapter online 后调度空文本 internal event 自动续跑 resume-pending session；
+- `gateway/run.py:5675-5758` — shutdown/restart drain 前预先写 resume_pending；drain 成功则清除，超时则保留并 interrupt。
+
+这比“进程重启后用户手动 /resume”更接近产品体验：平台 reconnect 后可以只恢复该平台自己的未完成 session，且不会把显式 `/stop` 的 suspended session 误恢复。
+
+### 2.7 StreamConsumer draft/edit/fallback
+
+`gateway/stream_consumer.py` 将同步 agent callback 桥接到异步平台投递，并根据平台能力选择流式策略：
+
+- `StreamConsumerConfig.transport` 支持 `auto` / `draft` / `edit` / `off`；
+- native draft streaming 用 `send_draft` 显示中间帧，final answer 仍走真实 sendMessage；
+- edit path 支持 flood-control adaptive backoff，连续失败后进入 fallback；
+- long-running preview 可用 fresh-final 发送完成态新消息，让平台可见时间戳反映完成时间；
+- fallback mode 只发送 missing tail，避免重复整段回复。
+
+这说明 channel 的“流式输出”不是一个开关，而是平台能力、编辑限制、长任务耗时和用户可见性之间的路由策略。
 
 ### 3. 平台覆盖：16 个适配器
 
@@ -402,5 +439,5 @@ Banner 展示：连接后端、token 用量（`CanonicalUsage`/`format_token_cou
 
 ## 来源
 
-- 源码版本：hermes-agent 0.8.0（`RELEASE_v0.8.0.md`）
+- 源码版本：hermes-agent 0.16.0（`pyproject.toml` / `hermes_cli/__init__.py`）
 - 分析深度：源码级（`gateway/run.py`/`session.py`/`config.py`/`platforms/base.py`/`gateway/pairing.py`/`cron/scheduler.py`/`cron/jobs.py`/`cli.py`/`tools/terminal_tool.py`/`tools/voice_mode.py`/`tools/transcription_tools.py`/`tools/tts_tool.py`）

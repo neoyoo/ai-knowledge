@@ -3,15 +3,17 @@ title: State Module Tree Serialization
 aliases: [状态树序列化, state_dict protocol, module state tree]
 kind: pattern
 created: 2026-05-02
-updated: 2026-05-02
+updated: 2026-06-10
 concepts_involved: [[runtime-state]], [[memory-system]], [[session-recovery]]
-reference_implementations: [agentscope]
-status: mature
+reference_implementations: [agentscope <=1.x]
+status: historical
 ---
 
 ## 一句话定义
 
 把 agent、memory、toolkit 等运行时对象组织成可递归序列化的状态树，用统一 `state_dict()` / `load_state_dict()` 协议完成保存、恢复和跨后端持久化。
+
+> 状态：历史模式。AgentScope Python 2.x 当前源码已迁移到 `AgentState + SessionRecord + StorageBase + MessageBus`，不再使用旧版 `StateModule / SessionBase / MemoryBase` 路径。本页保留作为“状态树快照”方案的历史参考，不应再作为 AgentScope 2.x 当前事实引用。
 
 ## 触发问题
 
@@ -52,11 +54,11 @@ status: mature
 
 ## 参考实现
 
-AgentScope 的 `StateModule`、`MemoryBase`、`SessionBase`：
+历史 AgentScope 的 `StateModule` / memory / session 路线：
 
-- `wiki/_impl/runtime-state--agentscope.md` — StateModule 自动注册子模块、ContextVar 配置、SessionBase 后端
-- `wiki/_impl/memory-system--agentscope.md` — Working Memory / Long-Term Memory 继承 StateModule
-- `wiki/_impl/session-recovery--agentscope.md` — 批量保存多个 state modules
+- `wiki/_impl/runtime-state--agentscope.md` — 当前 2.x 已改为 `AgentState + SessionRecord`
+- `wiki/_impl/memory-system--agentscope.md` — 当前 2.x 无内置长期 memory
+- `wiki/_impl/session-recovery--agentscope.md` — 当前 2.x 已改为 `StorageBase + ChatService + MessageBus`
 
 ## 迁移 checklist
 
@@ -78,4 +80,3 @@ AgentScope 的 `StateModule`、`MemoryBase`、`SessionBase`：
 - [[runtime-state]]
 - [[memory-system]]
 - [[session-recovery]]
-

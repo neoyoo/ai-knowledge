@@ -3,10 +3,10 @@ title: "Session Recovery — Hermes Agent"
 category: L2
 parent: "[[session-recovery]]"
 source: hermes-agent
-source_version: "0.8.0"
+source_version: "0.16.0"
 confidence: high
 created: 2026-04-08
-updated: 2026-04-08
+updated: 2026-06-10
 ---
 
 ## 概述
@@ -272,6 +272,6 @@ shadow git 架构的核心考量是**恢复能力与项目 git 历史解耦**：
 
 ## 来源
 
-- 源码版本：hermes-agent 0.8.0
+- 源码版本：hermes-agent 0.16.0
 - 分析深度：源码级
 - 主要文件：`hermes_state.py`（1304 行）、`run_agent.py`（9431 行）、`cli.py`（8736 行）、`gateway/session.py`、`gateway/config.py`、`agent/context_compressor.py`

@@ -3,7 +3,7 @@ title: Agent Registry & Discovery
 aliases: [Agent 注册发现, agent registry, service discovery for agents, AgentCard]
 category: L1
 created: 2026-04-19
-updated: 2026-04-19
+updated: 2026-06-10
 relations:
   - target: "[[multi-agent]]"
     type: feeds
@@ -17,7 +17,7 @@ relations:
   - target: "[[tool-system]]"
     type: alternative
     evidence: "agent 能力声明和 tool 能力声明是同一抽象的两个层次——tool registry 解决'有哪些工具'，agent registry 解决'有哪些 agent'"
-sources: [agentscope, openharness, claude-code, deer-flow, hermes-agent]
+sources: [agentscope-java, openharness, claude-code, deer-flow, hermes-agent]
 ---
 
 ## 一句话定义
@@ -38,7 +38,7 @@ sources: [agentscope, openharness, claude-code, deer-flow, hermes-agent]
 
 | Java 后端 | Agent 领域对应 | 对应物 |
 |---|---|---|
-| Eureka / Nacos / Consul | AgentScope Nacos + AgentCard | 服务注册中心 |
+| Eureka / Nacos / Consul | AgentScope Java Nacos + AgentCard | 服务注册中心 |
 | 服务接口签名（SOAP / gRPC proto） | AgentCard 能力声明（skills 字段） | 接口契约 |
 | DNS / k8s Service | k8s Service 本身就是轻量 agent registry | 名字解析 + 负载均衡 |
 | HTTP / gRPC 调用 | A2A 协议 | 调用协议 |
@@ -52,23 +52,23 @@ sources: [agentscope, openharness, claude-code, deer-flow, hermes-agent]
 
 ## 各家对比
 
-| 维度 | AgentScope | OpenHarness | Claude Code | DeerFlow | Hermes Agent |
+| 维度 | AgentScope Java | OpenHarness | Claude Code | DeerFlow | Hermes Agent |
 |------|-----------|-------------|-------------|----------|-------------|
-| **核心设计** | AgentCard + 三档 resolver（文件 / Well-Known URL / Nacos），配合 A2A 协议实现"命名-发现-调用"完整链路 | `TeamRecord` 内存字典，主 agent 启动子进程时记录 `(agent_id, process, pipe)`，进程间通信走 stdin/stdout | `swarm/backends/registry.ts` 只注册 swarm **后端类型**（本地/tmux/远程），不是注册 agent 实例 | `_background_tasks` dict 存运行中的 subagent 任务——本质是运行时 task 表，非跨进程 agent 注册 | `_active_children` 线程安全列表跟踪当前活跃的子 agent，用于 `interrupt()` 级联传播 |
-| **存储形态** | 三档：JSON 文件（本地开发）/ HTTP URL（静态部署）/ Nacos（生产） | Python dict（进程内） | TypeScript Map（进程内） | Python dict（进程内） | Python list + Lock（进程内） |
-| **发现协议** | AgentCardResolver 抽象接口，按配置加载不同 resolver；支持版本锁定（Nacos 独有） | 无发现协议——硬编码+字典查询 | 无发现协议——swarm backend 通过配置选择 | 无 | 无 |
-| **跨进程能力** | ✅ A2A 协议（httpx + 流式）；AgentCard 跨进程可复用 | 🟡 子进程 stdin/stdout，UTF-8 文本行协议 | ❌ 同进程 | ❌ 同进程（线程池） | ❌ 同进程（线程池） |
+| **核心设计** | AgentCard + A2A JSON-RPC/SSE + Well-Known/Nacos resolver + Spring Boot starter，形成 Java 企业服务化链路；server ready 后注册 AgentCard，client 端 resolver 可订阅/缓存 | `TeamRecord` 内存字典，主 agent 启动子进程时记录 `(agent_id, process, pipe)`，进程间通信走 stdin/stdout | `swarm/backends/registry.ts` 只注册 swarm **后端类型**（本地/tmux/远程），不是注册 agent 实例 | `_background_tasks` dict 存运行中的 subagent 任务——本质是运行时 task 表，非跨进程 agent 注册 | `_active_children` 线程安全列表跟踪当前活跃的子 agent，用于 `interrupt()` 级联传播 |
+| **存储形态** | AgentCard 可通过 well-known endpoint 发布，也可 release 到 Nacos；agent state 另由 `(userId, sessionId)` keyed store 持久化 | Python dict（进程内） | TypeScript Map（进程内） | Python dict（进程内） | Python list + Lock（进程内） |
+| **发现协议** | `AgentCardResolver` 抽象，WellKnown resolver 处理 URL 发现，Nacos resolver 处理动态订阅缓存；server 侧 `AgentRegistry` 负责注册 | 无发现协议——硬编码+字典查询 | 无发现协议——swarm backend 通过配置选择 | 无 | 无 |
+| **跨进程能力** | ✅ A2A JSON-RPC/SSE；AgentCard 作为跨进程能力契约 | 🟡 子进程 stdin/stdout，UTF-8 文本行协议 | ❌ 同进程 | ❌ 同进程（线程池） | ❌ 同进程（线程池） |
 | **能力声明** | ✅ AgentCard 结构化字段（name、description、skills、capabilities、version） | ❌ 无形式化能力描述 | 🟡 子 agent 分 subagent_type，但能力是 prompt 隐含 | 🟡 subagent_type 配置，能力是 prompt 隐含 | 🟡 子 agent 工具通过 `frozenset(DELEGATE_BLOCKED_TOOLS)` 剥除；无正向能力声明 |
-| **心跳 / 健康检查** | ✅ Nacos 原生支持，TTL 可配 | 🟡 `broken pipe` 检测 + 子进程重启 | ❌ | ❌ | ❌ |
-| **版本协商** | ✅ Nacos 支持版本锁定 | ❌ | ❌ | ❌ | ❌ |
-| **生产成熟度** | ✅ 阿里内部生产验证（Nacos 是阿里开源） | 内存状态，进程重启后团队关系丢失 | 单机 coordinator，作者自己承认"缺乏真正分布式协调" | 提及 Postgres 多实例部署但未展开 | 单机，Cron 无法水平扩展 |
-| **关键文件** | `src/agentscope/a2a/_base.py` / `_file_resolver.py` / `_well_known_resolver.py` / `_nacos_resolver.py`；`src/agentscope/agent/_a2a_agent.py` | `TeamRecord`（`multi-agent--openharness.md` L22-48） | `src/utils/swarm/backends/registry.ts` | `deerflow/tools/builtins/task_tool.py` `_background_tasks` | `hermes/agent/react_agent.py` `_active_children` |
+| **心跳 / 健康检查** | 🟡 Nacos 层可承接健康/动态注册；具体 agent 负载治理仍需上层策略 | 🟡 `broken pipe` 检测 + 子进程重启 | ❌ | ❌ | ❌ |
+| **版本协商** | 🟡 AgentCard 暴露 version；Nacos resolver 可承接版本治理，具体调度策略需上层实现 | ❌ | ❌ | ❌ | ❌ |
+| **生产成熟度** | ✅ Java/Spring/Nacos 生态路径完整，但对 Python/轻量部署偏重 | 内存状态，进程重启后团队关系丢失 | 单机 coordinator，作者自己承认"缺乏真正分布式协调" | 提及 Postgres 多实例部署但未展开 | 单机，Cron 无法水平扩展 |
+| **关键文件** | `ReActAgent.java`、`AgentStateStore.java`、`AgentRegistry.java`、`AgentScopeA2aServer.java`、`NacosAgentCardResolver.java`、`NacosA2aRegistry.java`、`AgentscopeA2aAutoConfiguration.java` | `TeamRecord`（`multi-agent--openharness.md` L22-48） | `src/utils/swarm/backends/registry.ts` | `deerflow/tools/builtins/task_tool.py` `_background_tasks` | `hermes/agent/react_agent.py` `_active_children` |
 
 ### 关键观察
 
-- **只有 AgentScope 做出了生产级 agent registry**。其余 5 家都是"运行时内存登记"，本质是为了跟踪当前生命周期内的子 agent，而不是让 agent 彼此"发现"
+- **只有 AgentScope Java 做出了接近生产级的 agent registry 参考**。其余 4 家都是"运行时内存登记"，本质是为了跟踪当前生命周期内的子 agent，而不是让 agent 彼此"发现"
 - **AgentCard 是真正的 agent 世界 API schema**。单独这一个抽象就把 agent 从"LLM 包装的黑盒"升级为"有契约的可组合单元"
-- **Nacos 在这里的选择不是偶然**：阿里团队的基础设施经验直接映射——Nacos 对动态配置 + 服务注册 + 版本管理三位一体的支持正好匹配 agent 场景需求
+- **Nacos 在这里的选择不是偶然**：阿里 Java/Spring 基础设施经验直接映射到 agent 服务化——但 Python AgentScope 2.x 当前主线是 session/workspace/team runtime，不应把 A2A/Nacos 能力继续归到 Python 仓库
 
 ## 设计权衡
 
@@ -79,8 +79,8 @@ sources: [agentscope, openharness, claude-code, deer-flow, hermes-agent]
 | **硬编码地址** | 代码写死 `http://subagent-svc:8080` | 单机或 subagent 类型固定且少 | 零 | 早期所有项目 |
 | **k8s Service / Ingress** | 依赖容器编排自带的 DNS + LB + health check | 横向扩展 **无状态** subagent worker；k8s 基建已有 | 低（只要你已在 k8s） | 任何容器化部署 |
 | **自建 Postgres/Redis 注册表** | 应用层表：worker_id / agent_type / capabilities / heartbeat / endpoint | 需要能力匹配、动态 worker 池、session 亲和性路由 | 中（~50 行代码 + 心跳维护逻辑） | trip-os 推荐 P2 路径 |
-| **AgentCard + Nacos**（AgentScope 完整方案） | 标准化 AgentCard schema + Nacos 服务注册 + 版本锁定 | 公司已有 Nacos、需要多 agent 跨系统互操作、阿里云生态 | 高（多一个中间件） | AgentScope 本家 |
-| **AgentCard + Google A2A**（协议标准化） | AgentCard + Google A2A 协议 + resolver 三档策略 | 跨组织 agent 互联（别家的 agent 调你的） | 最高（协议学习 + resolver 部署） | AgentScope 生产部署 |
+| **AgentCard + Nacos**（AgentScope Java 完整方案） | 标准化 AgentCard schema + Nacos 服务注册 + 版本锁定 | 公司已有 Nacos、需要多 agent 跨系统互操作、阿里云生态 | 高（多一个中间件） | AgentScope Java |
+| **AgentCard + A2A**（协议标准化） | AgentCard + A2A JSON-RPC/SSE + resolver 策略 | 跨组织 agent 互联（别家的 agent 调你的） | 最高（协议学习 + resolver 部署） | AgentScope Java |
 
 ### 场景决策指南
 
@@ -91,6 +91,8 @@ sources: [agentscope, openharness, claude-code, deer-flow, hermes-agent]
 **需要跨系统 / 跨组织互操作 → AgentCard + Nacos/A2A 全套**。比如你要把 trip-os 的 `travel-analyzer` agent 暴露给别的系统调用、或者你要调用别人家的 agent 作为 subagent。这时候 AgentCard 的标准化 schema、Nacos 的版本锁定、A2A 的协议一致性才产生收益。
 
 **从 Java 背景转入 → 反直觉警告：别一上来就上 Nacos**。Java 生态里 Nacos 是标配，但在 agent 场景里**k8s Service 已经是完整的"服务发现 + 健康检查 + 负载均衡"**，P1/P2 完全够用。只有当 agent 要对外暴露 / 跨系统互操作时（真正分布式系统属性），Nacos 这层才有价值。
+
+**如果同时支持 Python runtime 与 Java/企业服务化 runtime → registry 抽象不能绑死语言栈**。AgentScope Python 2.x 给的是 session/workspace/message-bus/team runtime；AgentScope Java 给的是 AgentCard/A2A/Nacos/Spring 发布与发现。agent-os 应把 `AgentRegistry` 定义成语言无关契约，本地实现可以是内存或 Postgres，Java/企业实现再接 Nacos/A2A。
 
 ### 常见陷阱
 
@@ -112,7 +114,8 @@ sources: [agentscope, openharness, claude-code, deer-flow, hermes-agent]
 
 ## L2 详情
 
-- [[multi-agent--agentscope]] — **AgentCard + A2A + Nacos 完整方案**，唯一生产级参考
+- [[agent-registry-discovery--agentscope-java]] — **AgentCard + A2A + Nacos + Spring Boot** 的独立生产级参考
+- [[multi-agent--agentscope]] — Python 2.x 的 session/workspace/message-bus/team runtime；历史 A2A/Nacos 内容不再代表当前 Python 源码
 - [[multi-agent--openharness]] — `TeamRecord` 内存注册（反面参考：进程重启丢失的痛点）
 - [[multi-agent--claude-code]] — `swarm/backends/registry` 是 agent runtime 后端注册，不是 agent 实例注册（术语相同但对象不同，需区分）
 - [[multi-agent--deer-flow]] — `_background_tasks` 运行时任务表（单机）
@@ -122,5 +125,5 @@ sources: [agentscope, openharness, claude-code, deer-flow, hermes-agent]
 
 - Google A2A 协议：https://github.com/google/A2A
 - Nacos 官方文档：https://nacos.io/en-us/docs/what-is-nacos.html
-- AgentScope A2A Agent 源码：`src/agentscope/agent/_a2a_agent.py`、`src/agentscope/a2a/` 目录（4 个 resolver 实现）
-- AgentScope A2A 示例：`examples/agent/a2a_agent/main.py`
+- AgentScope Java 源码：`/Users/neo/Desktop/project/git/agentscope-java`
+- AgentScope Python 2.x 源码：`/Users/neo/Desktop/project/git/agentscope`（当前主线为 app/session/workspace/team runtime）

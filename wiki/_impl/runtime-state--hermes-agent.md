@@ -3,10 +3,10 @@ title: "Runtime State — Hermes Agent"
 category: L2
 parent: "[[runtime-state]]"
 source: hermes-agent
-source_version: "0.8.0"
+source_version: "0.16.0"
 confidence: high
 created: 2026-04-08
-updated: 2026-04-08
+updated: 2026-06-10
 ---
 
 ## 概述
@@ -347,6 +347,6 @@ def get_hermes_home() -> Path:
 
 ## 来源
 
-- 源码版本：Hermes Agent 0.8.0
+- 源码版本：Hermes Agent 0.16.0
 - 分析文件：`hermes_state.py`、`hermes_constants.py`、`hermes_logging.py`、`hermes_time.py`、`run_agent.py`（AIAgent 初始化 / `_flush_messages_to_session_db` / 压缩分裂 / token 更新路径）、`agent/usage_pricing.py`、`agent/title_generator.py`、`hermes_cli/config.py`、`agent/credential_pool.py`、`hermes_cli/profiles.py`、`agent/redact.py`
 - 分析深度：源码级

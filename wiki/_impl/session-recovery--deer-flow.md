@@ -3,27 +3,27 @@ title: "Session Recovery — DeerFlow"
 category: L2
 parent: "[[session-recovery]]"
 source: deer-flow
-source_version: "2.0"
+source_version: "v2.0-m1-rc2-11-g16391e35"
 confidence: high
 created: 2026-04-07
-updated: 2026-04-07
+updated: 2026-06-10
 ---
 
 ## 概述
 
-DeerFlow 将会话持久化完全委托给 LangGraph 的 checkpointer 系统，自身零代码实现 session recovery。每个 agent 步骤（模型调用或工具执行）完成后自动保存 ThreadState，恢复时只需传入相同 `thread_id`，LangGraph 自动还原完整状态，包括消息历史、沙箱状态、thread_data、artifacts 和 todos。
+DeerFlow 的状态恢复仍以 LangGraph checkpointer 为底座，但最新实现已经不再是“自身零代码恢复”。Gateway/runtime 在 checkpointer 之上增加了 run lifecycle 控制层：run 启动前捕获 checkpoint snapshot，cancel 时可 interrupt + rollback，worker/manager 会清理或恢复 checkpoint，并对 orphaned inflight run 做 reconciliation。
 
 ## 架构分析
 
 ### Checkpointer 三档配置
 
-LangGraph 提供三种 checkpointer，通过 `backend/langgraph.json` 配置切换：
+LangGraph 接入点由 `backend/langgraph.json` 指向 `make_checkpointer()` factory；真正的后端选择在 `config.yaml` 中完成：优先兼容旧 `checkpointer:` 配置，其次使用统一 `database:` 配置，最后默认 memory。
 
 - **InMemorySaver**：开发/测试用，进程退出即丢失
 - **SqliteSaver**：单机持久化，适合本地部署
 - **PostgresSaver**：多服务器部署，适合生产环境
 
-三档配置完全由基础设施层决定，agent 代码无感知。
+三档配置完全由基础设施层决定，agent 代码无感知；`backend/langgraph.json` 只声明 factory 路径，不承载具体 backend 选择。
 
 ### ThreadState Schema
 
@@ -37,11 +37,24 @@ LangGraph 提供三种 checkpointer，通过 `backend/langgraph.json` 配置切�
 
 ### Per-Thread 目录系统
 
-`ThreadDataMiddleware` 为每个 thread 创建独立目录 `backend/.deer-flow/threads/{thread_id}/`，用于存储文件型数据（下载文件、生成报告等）。该目录在进程重启后保留，与 checkpointer 共同实现完整的 session 恢复。
+`ThreadDataMiddleware` 通过 `Paths` 为每个 thread 创建独立目录。base dir 由 constructor、`DEER_FLOW_HOME`、或 `{project_root}/.deer-flow` fallback 决定；新路径支持用户隔离：`{base_dir}/users/{user_id}/threads/{thread_id}/`，未传 `user_id` 时保留 legacy `{base_dir}/threads/{thread_id}/`。该目录在进程重启后保留，与 checkpointer 共同恢复文件型数据（下载文件、生成报告等）。
 
 ### 恢复机制
 
-恢复流程：客户端发起请求时携带 `thread_id` → LangGraph 从 checkpointer 读取该 thread 的最新 checkpoint → 还原完整 `ThreadState` → agent 从上次中断点继续执行。per-step checkpointing 意味着即使工具调用执行到一半，重启后也能从该步骤之后继续，而非重跑整个 turn。
+恢复流程：客户端发起请求时携带 `thread_id` → LangGraph 从 checkpointer 读取该 thread 的最新 checkpoint → 还原完整 `ThreadState` → runtime 按 run lifecycle 继续、取消或回滚。per-step checkpointing 能把恢复粒度收窄到最近已完成步骤，但不等于能恢复“半个工具调用内部”的进程状态；工具执行中途崩溃仍要依赖幂等工具、run rollback 或 orphaned inflight reconciliation。
+
+### Run lifecycle rollback
+
+DeerFlow 在 run 执行层记录 pre-run checkpoint，并把 cancel/rollback 变成 API 可控行为：
+
+- `backend/packages/harness/deerflow/runtime/runs/worker.py:185-201` — 捕获 pre-run checkpoint snapshot
+- `runtime/runs/worker.py:340-385` — cancel rollback 分支
+- `runtime/runs/worker.py:456-547` — restore / delete thread checkpoint
+- `runtime/runs/manager.py:466-633` — cancel、multitask 策略、orphaned run recovery
+- `backend/app/gateway/routers/thread_runs.py:224-239` — HTTP cancel action
+- `backend/tests/test_runtime_lifecycle_e2e.py:632-691` — E2E 验证 rollback 回到 run 前状态
+
+这条链路对 agent-os 的启发是：session recovery 不只是“能从 checkpoint 恢复”，还要定义 run cancel 时回到哪个状态、如何处理 inflight/orphaned run，以及如何把 rollback 结果暴露给 API。
 
 ### Thread 生命周期管理
 
@@ -51,13 +64,14 @@ Gateway API 暴露 `DELETE /api/threads/{thread_id}` endpoint，负责清理 Lan
 
 - `backend/langgraph.json` — checkpointer 类型配置（memory/sqlite/postgres）
 - `deerflow/agents/thread_state.py` — ThreadState schema 定义
+- `backend/packages/harness/deerflow/config/paths.py` — `DEER_FLOW_HOME` / user-scoped thread dir 路径抽象
 - `deerflow/agents/middlewares/thread_data_middleware.py` — per-thread 目录创建与管理
 - `backend/app/gateway/routers/threads.py` — Thread CRUD API，含 DELETE 清理逻辑
 
 ## 设计亮点
 
-- **零代码持久化**：agent 逻辑完全不涉及存储细节，checkpointer 由 LangGraph 基础设施透明处理
-- **Per-step checkpoint**：每个 tool call / model call 完成后立即保存，粒度比 per-turn 细，mid-execution 崩溃可恢复
+- **Checkpointer + run 控制分层**：状态存储仍由 LangGraph checkpointer 承担，但运行时用 RunManager/worker 管理 cancel、rollback、orphan reconciliation
+- **Per-step checkpoint**：每个已完成 step 后保存，粒度比 per-turn 细；mid-run 崩溃可从最近 checkpoint 恢复或由 run lifecycle 回滚/清理，但不承诺恢复半执行工具的内部状态
 - **三档切换无缝**：开发用内存、本地用 SQLite、生产用 Postgres，切换只改配置文件
 - **Postgres 支持横向扩展**：多个 Gateway 实例共享同一 Postgres，实现多服务器部署
 
@@ -70,5 +84,5 @@ Gateway API 暴露 `DELETE /api/threads/{thread_id}` endpoint，负责清理 Lan
 
 ## 来源
 
-- 源码版本：DeerFlow 2.0 (bytedance/deer-flow)
+- 源码版本：`v2.0-m1-rc2-11-g16391e35`
 - 分析深度：源码级

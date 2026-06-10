@@ -3,10 +3,10 @@ title: "Query Loop — Hermes Agent"
 category: L2
 parent: "[[query-loop]]"
 source: hermes-agent
-source_version: "0.8.0"
+source_version: "0.16.0"
 confidence: high
 created: 2026-04-08
-updated: 2026-04-08
+updated: 2026-06-10
 ---
 
 ## 概述
@@ -266,6 +266,6 @@ parsed["_budget_warning"] = "BUDGET WARNING: Iteration 75/90..."
 
 ## 来源
 
-- 源码版本：hermes-agent 0.8.0 (pyproject.toml)
+- 源码版本：hermes-agent 0.16.0 (pyproject.toml)
 - 核心文件：`run_agent.py`、`model_tools.py`、`tools/registry.py`
 - 分析深度：源码级

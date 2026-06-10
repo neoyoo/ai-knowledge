@@ -3,205 +3,132 @@ title: "hooks——agentscope"
 category: L2
 parent: "[[hooks]]"
 source: "agentscope"
-source_version: "0ff492c3508e532d2a33234dfe4a299833ce866c 2026-04-12"
+source_version: "v2.0.1-11-g0e5418e8"
 concept: "hooks"
 created: "2026-04-15"
+updated: "2026-06-10"
 confidence: high
 ---
 
 ## 概述
 
-AgentScope 通过 Python 元类（metaclass）在编译期把 `reply`、`print`、`observe` 三个核心方法自动包裹进 pre/post 钩子链，支持实例级（instance-level）和类级（class-level）两个注册作用域，钩子函数同步异步均可，返回非 None 时即可修改传入参数或输出结果。
+AgentScope Python 2.x 的扩展点已经不是旧版 metaclass hook。当前主线是 **middleware lifecycle hooks**：`MiddlewareBase` 定义 reply、reasoning、acting、model call、context compression 和 system prompt 六个切入点，`Agent` 在运行时按 middleware 列表构造洋葱链或顺序 transformer pipeline。
+
+当前源码中未找到旧页引用的 `agent/_agent_meta.py`、`AgentBase.register_class_hook()`、`_ReActAgentMeta` 等 metaclass hook 路径，因此旧的“实例级/类级 hook + OrderedDict + deepcopy”结论不再代表 2.x。
 
 ---
 
 ## 架构分析
 
-### 整体设计
+### Hook 点
 
-AgentScope 的 hooks 系统由三个文件协同构成：
+`MiddlewareBase` 当前暴露六类扩展点：
 
-| 文件 | 职责 |
-|------|------|
-| `types/_hook.py` | 定义 `AgentHookTypes` / `ReActAgentHookTypes` 类型别名 |
-| `agent/_agent_meta.py` | 元类 `_AgentMeta` 在类创建时包裹目标方法；`_wrap_with_hooks` 实现 pre/post 链 |
-| `agent/_agent_base.py` | `AgentBase` 声明所有 hook 容器（OrderedDict），提供注册/移除/清空 API |
-| `hooks/_studio_hooks.py` | 内置 hook 实现：把消息转发给 AgentScope Studio |
-| `hooks/__init__.py` | 公开 `_equip_as_studio_hooks` 便捷注册函数 |
+| Hook | 模式 | 作用 |
+|---|---|---|
+| `on_reply` | onion | 包裹完整 `Agent.reply_stream()` / `_reply_impl()` |
+| `on_reasoning` | onion | 包裹模型推理阶段 |
+| `on_acting` | onion | 包裹纯工具 I/O 执行层 |
+| `on_model_call` | onion | 包裹原始模型 API 调用 |
+| `on_compress_context` | onion | 包裹 `Agent.compress_context()` |
+| `on_system_prompt` | transformer | 顺序改写 system prompt 字符串 |
 
-### 六个 Hook 点（AgentBase）
+`is_implemented(hook_name)` 会比较子类方法和基类占位方法是否相同，只把真正 override 的 hook 放入对应 middleware 列表。Agent 初始化时把 middleware 拆成 `_reply_middlewares`、`_reasoning_middlewares`、`_acting_middlewares`、`_model_call_middlewares`、`_compress_context_middlewares` 和 `_system_prompt_middlewares`。
 
-```
-pre_reply → reply() → post_reply
-pre_print → print() → post_print
-pre_observe → observe() → post_observe
-```
+### 两种执行模型
 
-ReActAgentBase 在此基础上额外增加：
+**Onion pattern** 用于可包裹的异步流程。以 reply 为例，`Agent._reply()` 递归构造 `next_handler()`，每层 middleware 可以在调用前后执行逻辑，也可以改变传给下一层的 `input_kwargs`。
 
 ```
-pre_reasoning → _reasoning() → post_reasoning
-pre_acting    → _acting()    → post_acting
+middleware[0].on_reply(agent, input_kwargs, next_handler)
+  -> middleware[1].on_reply(...)
+      -> Agent._reply_impl(inputs=...)
 ```
 
-### 两个作用域
+**Transformer pattern** 用于 system prompt。多个 middleware 依序接收上一个 middleware 的输出字符串，最终结果再进入 model input。
 
-- **实例级（instance-level）**：`_instance_{hook_type}_hooks`，`__init__` 中以 `OrderedDict()` 初始化，只影响当前 agent 实例
-- **类级（class-level）**：`_class_{hook_type}_hooks`，类体中以 `OrderedDict()` 声明，影响该类的所有实例
+### App 层内置 middleware
 
-注册顺序：实例级 hooks 先执行，类级 hooks 后执行。
+服务化运行时通过 `ChatService` 每轮装配 middleware：
 
-### 元类自动包裹机制
+- `InboxMiddleware`：从 message bus inbox 注入 team/background task 消息
+- `StateChangeMiddleware`：把状态变化发布到 session event stream
+- `ToolOffloadMiddleware`：对长工具任务做后台 offload / wakeup
+- `extra_agent_middlewares`：应用方按 user/agent/session 动态追加
 
-`_AgentMeta.__new__` 在类创建时扫描 `attrs`，发现 `reply`、`print`、`observe` 中任一方法则替换为 `_wrap_with_hooks(original_func)` 的结果。这意味着子类只要定义这些方法，就自动获得 hook 能力，无需手动调用任何基类逻辑。
-
-### 参数归一化
-
-`_normalize_to_kwargs(func, self, *args, **kwargs)` 用 `inspect.signature` 把位置参数和关键字参数统一成一个 `dict`，传给 pre-hook，使 hook 函数无需关心调用方式的差异。
+这说明 AgentScope 2.x 的 hook 主要服务 Web/distributed runtime，而不是单纯给 SDK 子类注入 pre/post 方法。
 
 ---
 
 ## 关键代码路径
 
-### 路径一：元类包裹（类创建阶段）
-
-```
-_AgentMeta.__new__
-  └─ for func_name in ["reply", "print", "observe"]:
-       attrs[func_name] = _wrap_with_hooks(attrs[func_name])
-           └─ async_wrapper(self, *args, **kwargs)
-                ├─ _normalize_to_kwargs(original_func, self, *args, **kwargs)
-                ├─ [pre-hook 链] for pre_hook in instance_hooks + class_hooks:
-                │    modified = await _execute_async_or_sync_func(pre_hook, self, deepcopy(kwargs))
-                │    if modified is not None: current_kwargs = modified
-                ├─ current_output = await original_func(self, *args, **others, **kwargs)
-                └─ [post-hook 链] for post_hook in instance_hooks + class_hooks:
-                     modified = await _execute_async_or_sync_func(post_hook, self, deepcopy(kwargs), deepcopy(output))
-                     if modified is not None: current_output = modified
-```
-
-关键文件：`agent/_agent_meta.py` L55-L144
-
-### 路径二：注册 hook（运行时）
-
-```python
-# 实例级
-agent.register_instance_hook(
-    hook_type: AgentHookTypes,  # e.g. "pre_reply"
-    hook_name: str,
-    hook: Callable,
-) -> None
-    └─ hooks = getattr(self, f"_instance_{hook_type}_hooks")
-       hooks[hook_name] = hook
-
-# 类级
-AgentBase.register_class_hook(
-    hook_type: AgentHookTypes,
-    hook_name: str,
-    hook: Callable,
-) -> None
-    └─ hooks = getattr(cls, f"_class_{hook_type}_hooks")
-       hooks[hook_name] = hook
-```
-
-关键文件：`agent/_agent_base.py` L533-L616
-
-### 路径三：内置 Studio Hook 注册
-
-```python
-# hooks/__init__.py
-def _equip_as_studio_hooks(studio_url: str) -> None:
-    AgentBase.register_class_hook(
-        "pre_print",
-        "as_studio_forward_message_pre_print_hook",
-        partial(
-            as_studio_forward_message_pre_print_hook,
-            studio_url=studio_url,
-            run_id=_config.run_id,
-        ),
-    )
-```
-
-注册为类级 pre_print hook，所有 agent 实例打印时都会触发 HTTP 推送到 Studio。失败时有 3 次重试 + 优雅降级（`logger.warning`），不会因网络问题崩溃。
-
-关键文件：`hooks/__init__.py` L17-L29，`hooks/_studio_hooks.py` L12-L58
-
-### 路径四：同步/异步统一执行
-
-```python
-async def _execute_async_or_sync_func(func, *args, **kwargs):
-    if await _is_async_func(func):
-        return await func(*args, **kwargs)
-    return func(*args, **kwargs)
-```
-
-关键文件：`_utils/_common.py` L133-L156
+- `src/agentscope/middleware/_base.py` — `MiddlewareBase` 六个 hook 定义和 `is_implemented()`
+- `src/agentscope/agent/_agent.py` — `Agent.__init__()` 按 hook 类型拆分 middleware
+- `src/agentscope/agent/_agent.py` — `_reply()` / `_reasoning()` / `_acting()` 构造 onion chain
+- `src/agentscope/agent/_agent.py` — `compress_context()` 构造 `on_compress_context` chain
+- `src/agentscope/app/_service/_chat.py` — App 层每轮注入 `InboxMiddleware` / `StateChangeMiddleware` / `ToolOffloadMiddleware`
 
 ---
 
 ## 设计亮点
 
-### 1. 元类透明注入，零侵入子类
+### 1. Middleware 粒度对齐 agent loop
 
-子类只需 `class MyAgent(AgentBase)` 并实现 `reply`，`_AgentMeta` 就自动在编译期包裹 hooks。子类代码中完全看不到 hook 相关代码，维护成本为零。
+扩展点覆盖 reply、reasoning、model call、acting、context compression，基本对应 agent 主循环的关键阶段。相比只暴露 pre/post tool 或 pre/post reply，这种粒度更适合做观测、限流、策略注入和后台任务 offload。
 
-### 2. 修改语义由返回值决定，而非强制
+### 2. `on_acting` 刻意只包裹纯 I/O
 
-pre-hook 返回 `None` 表示"观察但不修改"，返回新 dict 才会替换传入参数；post-hook 同理。这使纯观测型 hook（如日志、追踪）无需任何返回语句，也不会意外影响主流程。
+`on_acting` 的注释明确说明：权限检查、输入校验、context 写入都在 hook 外部完成；hook 只包裹 `toolkit.call_tool`。这降低了把工具执行 offload 到后台时破坏 agent context 的风险。
 
-### 3. OrderedDict 保证执行顺序
+### 3. System prompt 用 transformer 而非 onion
 
-hook 注册顺序即执行顺序，且 `name` 键实现覆盖语义——同名 hook 重新注册即替换，行为可预期。
+system prompt 是字符串转换，不是事件流。AgentScope 把它设计成顺序 transformer pipeline，避免每个 middleware 都要处理 async generator 的复杂度。
 
-### 4. 深拷贝隔离副作用
+### 4. App runtime 可以按 session 动态注入
 
-`_wrap_with_hooks` 传给 pre-hook 的是 `deepcopy(current_normalized_kwargs)`，传给 post-hook 的是 `deepcopy(kwargs)` 和 `deepcopy(output)`。hook 修改拷贝不会直接影响主流程对象；只有通过返回值显式声明才能传播修改。
-
-### 5. 同步异步统一
-
-`_execute_async_or_sync_func` 运行时检测函数类型，同步和异步 hook 可以混用。开发者不需要关心调用方是否在 event loop 中。
-
-### 6. ReActAgent 在 reasoning/acting 粒度开放扩展点
-
-`_ReActAgentMeta` 继承 `_AgentMeta`，额外在 `_reasoning` 和 `_acting` 方法上也注入 hooks，允许在推理步骤和工具调用步骤分别做干预（如注入 chain-of-thought 修正、记录 tool 调用日志）。
+`extra_agent_middlewares(user_id, agent_id, session_id)` 每轮运行时生成 middleware，适合多租户 Web agent：不同用户、不同 session 可以挂不同审计、策略或观测逻辑。
 
 ---
 
 ## 局限性
 
-### 1. 类级 hook 存在继承共享问题（已知 bug，被注释掉的测试揭示）
+### 1. 无声明式注册 / 热重载机制
 
-`_class_pre_reply_hooks` 等 dict 以类属性形式声明在 `AgentBase` 上，子类 `ChildAgent` 注册 class hook 时实际写入的是父类共享的同一个 `OrderedDict`（除非子类显式重声明），导致不同子类的 class hook 相互污染。`hook_test.py` 中大量测试用例被注释掉（L619-L776），注释写明"The studio requires the hook inherited from AgentBase, we will solving this problem later"，说明团队清楚这个缺陷但尚未解决。
+middleware 通过构造 `Agent(..., middlewares=[...])` 注入，不是用户配置文件级 hook。若要像 Claude Code/OpenHarness 那样由用户声明 shell/http hooks，需要在 App 壳层另建注册和热重载系统。
 
-**实际影响**：目前 `_equip_as_studio_hooks` 注册在 `AgentBase` 本身，避开了继承问题；但用户若在子类上调用 `register_class_hook`，行为可能出乎意料。
+### 2. Hook 顺序由列表顺序隐式决定
 
-### 2. 无拦截/短路语义（pre-hook 不能阻止主方法执行）
+框架没有 `priority`、`before/after`、`depends_on` 等声明式排序。多个 middleware 同时修改同一阶段输入时，顺序必须由装配方维护。
 
-pre-hook 只能修改输入参数，无法返回一个值来"短路"主方法。若需要实现缓存、条件跳过等模式，需要通过其他机制（如在 pre-hook 中 raise 异常）绕行，不优雅。
+### 3. `on_acting` 看不到权限和 context 写入
 
-### 3. hook 函数签名有隐式约定
+这是安全上的刻意隔离，但也意味着如果想审计“权限判断 + 工具执行 + context 落盘”的完整闭环，需要组合 `on_acting`、agent event stream 和 permission/tool 层日志，单个 hook 不够。
 
-pre-hook 必须接受 `(self, kwargs: dict)` 两个参数，post-hook 必须接受 `(self, kwargs: dict, output: Any)` 三个参数，且顺序固定。框架没有类型校验，签名不符时运行时报错，调试体验差。
+### 4. Middleware 本身无失败策略元数据
 
-### 4. 深拷贝开销
+hook 抛异常会沿主流程传播。框架没有 `fail_open/fail_closed`、timeout、retry 这类声明式策略，需要 middleware 自己实现。
 
-每个 hook 调用前都做 `deepcopy`，在大消息体（如长上下文）或高频调用场景下有性能代价，且框架层没有提供跳过拷贝的选项。
+---
 
-### 5. hooks 模块仅有单个内置实现
+## 对 agent-os 的借鉴
 
-`hooks/` 目录目前只有 Studio 转发一个内置 hook，缺乏通用工具钩子（如消息日志、速率限制、token 计数等），开发者需自行实现并注册。
+agent-os 如果同时支持本地代理和 Web 分布式代理，应把 hook 设计成两层：
+
+- 本地 SDK 层：`MiddlewareBase` 风格的 Python/TS 原生 hook，覆盖 loop、model、tool、context
+- 产品壳层：声明式 hook registry，处理用户配置、热重载、超时、失败策略和审计
+
+核心抽象建议保留 `next_handler` onion 模式，但要额外加入 hook metadata：`priority`、`timeout_ms`、`failure_policy`、`scope(local/session/tenant)`。
 
 ---
 
 ## 来源
 
-- 源码版本：0ff492c3508e532d2a33234dfe4a299833ce866c 2026-04-12
+- 项目：`/Users/neo/Desktop/project/git/agentscope`
+- 版本：`v2.0.1-11-g0e5418e8`
 - 核心文件：
-  - `src/agentscope/agent/_agent_meta.py`
-  - `src/agentscope/agent/_agent_base.py`
-  - `src/agentscope/agent/_react_agent_base.py`
-  - `src/agentscope/hooks/__init__.py`
-  - `src/agentscope/hooks/_studio_hooks.py`
-  - `src/agentscope/types/_hook.py`
-  - `tests/hook_test.py`
-- 分析深度：源码级
+  - `src/agentscope/middleware/_base.py`
+  - `src/agentscope/agent/_agent.py`
+  - `src/agentscope/app/_service/_chat.py`
+  - `src/agentscope/app/middleware/_inbox_middleware.py`
+  - `src/agentscope/app/middleware/_state_change_middleware.py`
+  - `src/agentscope/app/middleware/_tool_offload_middleware.py`

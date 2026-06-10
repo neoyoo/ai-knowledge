@@ -3,7 +3,7 @@ title: Memory System
 aliases: [记忆系统, persistent memory, cross-session memory]
 category: L1
 created: 2026-04-06
-updated: 2026-04-15
+updated: 2026-06-10
 relations:
   - target: "[[context-management]]"
     type: feeds
@@ -11,16 +11,16 @@ relations:
     type: uses
   - target: "[[tool-system]]"
     type: depends_on
-    evidence: "AgentScope LTM 的 record_to_memory / retrieve_from_memory 以工具函数形式暴露，LLM 通过工具调用自主管理长期记忆；记忆能力与工具系统深度耦合，LTM 本质是一组特殊工具"
+    evidence: "长期记忆召回通常需要通过工具系统展开原文或 evidence：TencentDB Agent Memory 的 memory/conversation search 与 MemPalace 的 MCP 工具都说明，auto-recall 只能注入导航信息，细节仍要靠受预算和权限控制的 recall/read 工具"
   - target: "[[prompt-system]]"
     type: feeds
     evidence: "记忆召回最终会注入 prompt / messages；memory-context fencing 与 prompt 注入边界决定召回内容是否会被误当成用户指令"
   - target: "[[multi-agent]]"
     type: supports
-    evidence: "AgentScope Mark 系统允许同一 memory 实例服务多个 agent/角色，通过 mark 过滤隔离各自上下文，为 multi-agent 编排中的工具链与主对话流分离提供了轻量原语"
-sources: [claude-code, openharness, deer-flow, hermes-agent, mempalace, agentscope]
+    evidence: "多 agent 系统若共享长期 memory，必须显式区分 session-local state、agent-local memory 与 shared evidence store；AgentScope 2.x 的 team worker 使用独立 AgentState，长期共享记忆需外接 MemPalace/TencentDB Agent Memory 等系统"
+sources: [claude-code, openharness, deer-flow, hermes-agent, mempalace, agentscope, tencentdb-agent-memory]
 ---
-	
+
 ## 一句话定义
 
 跨会话的持久记忆 — 和 context 不同，活过对话结束，下次还在。
@@ -36,9 +36,17 @@ sources: [claude-code, openharness, deer-flow, hermes-agent, mempalace, agentsco
 
 | 维度 | Claude Code | OpenHarness | DeerFlow | Hermes Agent | MemPalace | AgentScope |
 |------|------------|-------------|----------|-------------|-----------|------------|
-| 核心设计 | 在上下文压缩之外引入 Session Memory File（L3 知识载体），将长期稳定信息剥离为可落盘、可审阅的 Markdown 工作笔记，由后台 subagent 异步提取，不阻塞主会话 | 忠实移植 Claude Code 记忆模式：以 `~/.openharness/data/memory/{project-name}-{sha1}/` 为存储根，`MEMORY.md` 作为索引入口，prompt 构建时注入全文并通过纯词法匹配（约 20 行）选取最相关的最多 5 个专题文件注入 | 结构化 JSON 存储（`memory.json`）分三段：user（工作上下文）、history（近远期背景）、facts（带置信度的事实数组）；`MemoryMiddleware` 在 `after_agent` 钩子异步去抖更新；内置纠错/强化信号——检测"这不对"/"对"等词语自动调整事实置信度 | 双层架构：内置层（`MEMORY.md` + `USER.md`，始终存在）+ 外部 provider 层（8 个可插拔 provider，一次只激活一个）；session 启动时烘焙冻结快照注入系统提示，中途写入不更新缓存；Nudge 机制每隔 N 轮 fork 独立后台 review agent 自主写入记忆 | 完全 raw verbatim 存储（"No summaries. Ever."）；Palace 空间隐喻（Wing → Hall → Room → Drawer）；**4 个独立层**：L0 identity（~100 tokens，始终加载，用户手写身份文本）/ L1 essential story（~500-800 tokens，始终加载，按 importance 排名 top-15 drawers）/ L2 on-demand（~200-500 tokens/次，按需 metadata 过滤）/ L3 deep search（无限制，ChromaDB 语义搜索）；`wake_up()` 加载 L0+L1（合计约 600-900 tokens 基础上下文），L2/L3 按需触发；SQLite 时态知识图谱独立于向量库 | 两层正交架构：Working Memory（`MemoryBase` 接口，4 种后端：内存/Redis/SQLAlchemy/Tablestore）+ Long-Term Memory（两条技术路线：mem0 向量语义路线 / ReMe 任务-个人-工具三分路线）；两层均继承 `StateModule` 统一序列化协议，天然适配分布式部署；LTM 以工具函数 `record_to_memory` / `retrieve_from_memory` 暴露给 LLM 自主调用 |
-| 关键特点 | 多维触发保护（`shouldExtractMemory()` 综合 token 规模/增量/tool call 次数/自然停顿点）；文件即记忆（人工可读、可编辑、可版本控制）；三层知识载体明确分工（消息历史/压缩快照/Session Memory） | 词法检索完全无外部依赖，无需 embedding 模型或向量数据库；文件系统存储人类可读、可直接编辑、可用 git 版本控制；首行元数据约定（160 字符描述）将检索开销降到极低 | 纠错/强化信号隐式反馈闭环（同类项目独有）；结构化 schema + 置信度排序注入，信噪比高于扁平 markdown；去抖异步更新不阻塞主循环；tiktoken 精确 token 预算控制 | Context Fencing（`<memory-context>` 标签 + "NOT new user input" 标注）防止召回内容被误识别为用户输入；注入防护扫描（11 类威胁模式：prompt injection + 凭证外泄 + 零宽字符）；FTS5 跨 session 搜索 + 并发 LLM 摘要两级召回；单 provider 约束防止工具 schema 膨胀 | LongMemEval R@5 96.6% 零 API 成本（纯 ChromaDB 语义搜索，无 LLM 参与）；19 个 MCP 工具覆盖搜索/KG/图遍历/agent diary；PALACE_PROTOCOL 自注入（status 响应中嵌入行为规范，AI wake-up 时自动学习）；时态 KG 支持 as_of 时间点查询 | Mark 标记系统：同一 memory 实例内按字符串标签做语义分区（`get_memory(mark="tool_calls")`），同一会话内多角色/多流不互相污染；Redis 实现额外维护 `marks_index`（Redis Set）避免全量 SCAN；mem0 路线三级降级写入（user → assistant → infer=False）保证内容一定落库；ReMe 路线将 LTM 拆成 Personal/Task/Tool 三个独立实例，各自专属 prompt flow；`StateModule` 序列化使 memory 状态可跨进程持久化 |
-| 局限 | 记忆内容质量依赖 LLM 归纳；跨会话 memory file 不自动合并；后台提取无用户可见反馈 | 检索仅匹配标题和首行描述，正文内容对检索不可见；无后台自动提取机制，记忆写入完全依赖显式调用；无跨项目记忆共享能力 | 无向量检索（仅置信度排序，无语义相关性召回）；置信度排序非语境感知（高置信度事实不一定与当前对话相关）；无跨 agent 记忆共享 | 冻结快照导致本轮写入的记忆下次 session 才生效；单 provider 约束无法同时激活多个外部后端；内置层全量注入无语义排序，记忆条目增多信噪比下降；后台 review agent 成本和延迟在高频短对话场景不可控 | raw verbatim 无限存储增长，无自动剪枝；AAAK 压缩模式退步 12 个百分点（84.2% vs raw 96.6%）；无注入防护，任何内容可写入向量库；L2 层按 metadata 过滤不做语义搜索，room 分类粗粒度导致大量内容落入 general | Working Memory 的 `_compressed_summary` 只是存储槽位，自动摘要触发与 LLM 调用发生在 agent/context-management 层；两层记忆无自动联动，框架不提供「超过 N 轮自动压缩写 LTM」机制，开发者须手动串联；ReMe 路线对 DashScope/OpenAI 强绑定，其他 LLM provider 直接报错；RAG 模块与 memory 完全正交无融合接口；`delete_by_mark` 未在基类声明为抽象方法，某些后端静默缺失；mem0 存在版本兼容硬编码分支（`mem0ai <= 0.1.115`）|
+| 核心设计 | 在上下文压缩之外引入 Session Memory File（L3 知识载体），将长期稳定信息剥离为可落盘、可审阅的 Markdown 工作笔记，由后台 subagent 异步提取，不阻塞主会话 | 本地文件 memory：`MEMORY.md` 作为索引入口，专题 Markdown 支持 schema-v1 frontmatter（type/scope/category/importance/signature/ttl/disabled 等）；prompt 构建时注入 bounded entrypoint，并按 metadata/body/importance/usage/recency 选择相关专题；turn 结束后可 auto-extract，后台 Auto-Dream 做整理/剪枝 | 结构化 JSON 存储（`memory.json`）分三段：user（工作上下文）、history（近远期背景）、facts（带置信度的事实数组）；`MemoryMiddleware` 在 `after_agent` 钩子异步去抖更新；内置纠错/强化信号——检测"这不对"/"对"等词语自动调整事实置信度 | 双层架构：内置层（`MEMORY.md` + `USER.md`，始终存在）+ 外部 provider 层（8 个可插拔 provider，一次只激活一个）；session 启动时烘焙冻结快照注入系统提示，中途写入不更新缓存；Nudge 机制每隔 N 轮 fork 独立后台 review agent 自主写入记忆 | 默认 Chroma raw verbatim reference backend + 可替换 backend/source contract；Palace 空间隐喻（Wing → Hall → Room → Drawer）；4 层渐进加载：L0 identity、L1 essential story、L2 on-demand metadata、L3 deep search；SQLite 时态 KG 独立于向量库 | AgentScope Python 2.x 当前没有内置跨会话长期 memory；只保留 session-local `AgentState.context/summary/tool_context`、Storage message history 与 workspace/offloader evidence，长期记忆需外接 MCP/skills/storage extension |
+| 关键特点 | 多维触发保护（`shouldExtractMemory()` 综合 token 规模/增量/tool call 次数/自然停顿点）；文件即记忆（人工可读、可编辑、可版本控制）；三层知识载体明确分工（消息历史/压缩快照/Session Memory） | 零 embedding 依赖但评分不再只靠标题/首行；schema 支持 TTL、disabled、supersedes、scope/type；usage index 记录 recalled memory；Auto-Dream 有 lock、backup、preview、rollback、diff 元数据；OpenHarness core 与 ohmo personal memory 分层 | 纠错/强化信号隐式反馈闭环（同类项目独有）；结构化 schema + 置信度排序注入，信噪比高于扁平 markdown；去抖异步更新不阻塞主循环；tiktoken 精确 token 预算控制 | Context Fencing（`<memory-context>` 标签 + "NOT new user input" 标注）防止召回内容被误识别为用户输入；注入防护扫描（11 类威胁模式：prompt injection + 凭证外泄 + 零宽字符）；FTS5 跨 session 搜索 + 并发 LLM 摘要两级召回；单 provider 约束防止工具 schema 膨胀 | LongMemEval R@5 96.6% 零 API 成本；30 个 MCP 工具覆盖搜索/KG/图遍历/tunnel/sync/get/list/update drawer/hook settings/reconnect/agent diary；语义向量候选叠加 BM25 rerank/union fallback；PALACE_PROTOCOL 自注入；时态 KG 支持 as_of 查询 | `AgentState.summary/context` 随 `SessionRecord.state` 恢复；大 context/tool result 可 offload 到 workspace evidence；message history 结构化存储用于恢复和 UI 展示；没有把 memory lifecycle 硬塞进 agent core，便于外接专门 memory 系统 |
+| 局限 | 记忆内容质量依赖 LLM 归纳；跨会话 memory file 不自动合并；后台提取无用户可见反馈 | 无向量/嵌入搜索，语义同义词仍可能漏召回；body preview 只覆盖正文前 300 字符；Auto-extract/Auto-Dream 依赖 LLM 归纳质量；文件修改虽有 backup/rollback metadata，但不是数据库事务；无跨项目记忆共享 | 无向量检索（仅置信度排序，无语义相关性召回）；置信度排序非语境感知（高置信度事实不一定与当前对话相关）；无跨 agent 记忆共享 | 冻结快照导致本轮写入的记忆下次 session 才生效；单 provider 约束无法同时激活多个外部后端；内置层全量注入无语义排序，记忆条目增多信噪比下降；后台 review agent 成本和延迟在高频短对话场景不可控 | raw verbatim 无限存储增长，无自动剪枝；AAAK 压缩模式退步 12 个百分点（84.2% vs raw 96.6%）；无注入防护，任何内容可写入向量库；L2 层按 metadata 过滤不做语义搜索，room 分类粗粒度导致大量内容落入 general；source adapter contract 尚未完全覆盖 first-party miners | 没有“什么值得记、怎么写入、怎么召回、怎么过期”的长期 memory pipeline；summary 是当前 session 压缩投影，不是事实记忆；offload 有路径回链但无索引/排序；message history 不等于可检索长期 memory |
+
+### 新增源补充：TencentDB Agent Memory
+
+| 维度 | TencentDB Agent Memory |
+|---|---|
+| 核心设计 | 双链路分层记忆：短期 context offload 把大工具结果落到 `refs/*.md`，用 L1 摘要和 L2 Mermaid/MMD 符号图维护当前任务地图；长期 memory 用 L0 原始对话、L1 结构化记忆、L2 scene blocks、L3 persona 做跨会话召回 |
+| 关键特点 | 本地优先但可切 TCVDB；auto-recall 将 L1 动态记忆放进 `prependContext`，将 L2 scene navigation / L3 persona / tools guide 放进 `appendSystemContext` 以照顾 prompt cache；`tdai_memory_search` 和 `tdai_conversation_search` 让 LLM 在注入片段不足时主动展开 |
+| 局限 | 零配置默认 SQLite 不等于向量检索可用，embedding provider 为 `none` 时 vec0 表延迟创建；MMD 归因依赖 L2 LLM，`node_mapping` 覆盖是 prompt 约束而非硬校验；每轮 3 次 memory search 目前是 guide/description 约束，未实现 hard limit |
 
 ## 设计权衡
 
@@ -51,7 +59,9 @@ sources: [claude-code, openharness, deer-flow, hermes-agent, mempalace, agentsco
 | 结构化数据库（SQLite/Postgres） | schema 化存储，精确查询，强事务保证 | 用户画像、任务历史、有明确结构的偏好数据 | 自定义任务管理 agent |
 | 混合（文件 + 向量） | Markdown 保留可读性，向量索引加速语义搜索 | 生产级长期助手，兼顾可调试性和检索质量 | 需自建 |
 | 双层（内置始终在线 + 外部可插拔） | 内置层保底可靠性，外部层按需扩展能力（向量/图谱/用户建模），二者独立维护 | 需要多种检索后端灵活切换、又不想每个部署都自建的通用助手 | Hermes Agent |
-| Raw verbatim + 向量搜索 | 完整对话原文入库，ChromaDB embedding 做语义检索；不做 LLM 提取，零信息损失，零 API 成本 | 个人助手/长期记忆、数据隐私敏感场景、希望零 API 成本运行的本地系统；对存储空间不敏感 | MemPalace |
+| Raw verbatim + 向量搜索 | 完整对话原文入库，默认 ChromaDB embedding 做语义检索；不做 LLM 提取，降低摘要丢失细节的风险 | 个人助手/长期记忆、数据隐私敏感场景、希望零 API 成本运行的本地系统；对存储空间不敏感 | MemPalace reference backend |
+| Backend/source adapter contract | 记忆后端和来源 ingest 都走 typed contract + plugin registry，后端可替换，来源需声明 byte-preserving / lossy 能力 | 企业长期 memory 平台、多 backend 部署、多来源 ingest、需要租户/namespace isolation contract | MemPalace v3.4 |
+| Evidence store + 符号地图 + 渐进召回 | 原文工具结果/场景块只作为 evidence 保存，prompt 里注入高密度任务地图和召回 handle，细节由 LLM 按需读取 | 工具结果密集的长任务 agent、本地代码代理、需要同时降低 token 和保留证据回链的系统 | TencentDB Agent Memory |
 
 ### 场景决策指南
 
@@ -70,16 +80,18 @@ Markdown 保留人类可读性和可干预性，向量索引解决规模化检�
 **如果你需要可换的记忆后端，又关注前缀缓存成本 → 双层 + 冻结快照（Hermes Agent 模式）**
 内置层提供零依赖的基础记忆，外部 provider 通过统一 ABC 热插拔（Honcho/Hindsight/Mem0/Holographic 等 8 种）。冻结快照确保系统提示前缀每个 session 只变一次，Anthropic Prompt Cache 命中率最大化。注意：如果你的对话是长 session 且中途经常获得重要新信息，冻结快照的"下次才生效"设计会让 agent 在当前 session 内无法利用刚学到的内容。
 
-**如果你在做 multi-agent 系统，需要在同一会话内对不同 agent/角色隔离上下文 → Mark 标记系统（AgentScope 模式）**
+**如果你在做 agent runtime，而不是专门 memory 产品 → 把长期记忆做成外接 MemoryService**
 
-大多数记忆系统只有「全量历史」或「按会话隔离」两档。AgentScope 的 mark 系统提供了第三档：同一 memory 实例内的语义分区——给工具调用历史打 `tool_calls` mark，给规划步骤打 `planning` mark，不同 agent 调用 `get_memory(mark=...)` 精确取出所需子集，而不是每次传入完整历史（代码证据：`InMemoryMemory` 内部存 `list[tuple[Msg, list[str]]]`，`RedisMemory` 额外维护 `marks_index` Set 避免全量扫描）。代价是 mark 体系需要开发者自行设计和维护，mark 名称无类型约束，多人开发时容易命名漂移。与 Hermes Agent 的「单 provider 约束」不同，这里的隔离是在同一后端内做细粒度分区，而非切换后端。
-
-**如果你需要长期记忆但诉求各不相同（个人偏好 / 任务经验 / 工具使用习惯）→ 记忆三分法（AgentScope ReMe 路线）**
-
-将 LTM 拆成三个独立实例（`ReMePersonalLongTermMemory` / `ReMeTaskLongTermMemory` / `ReMeToolLongTermMemory`），每个子类有专属的 prompt flow 和 `record_to_memory` docstring 直接作为 LLM 工具的 description——这承认了不同类型记忆的检索策略本质不同：个人偏好需要语义相似，任务经验需要结构化步骤检索，工具指南需要基于工具名称精确匹配。与 MemPalace 的 raw verbatim 单一存储相比，三分法的代价是需要维护三个实例、且对 DashScope/OpenAI 强绑定（其他 LLM provider 直接抛 `ValueError`）。适合：已使用 AgentScope 框架且以 DashScope/OpenAI 为主要 LLM provider、需要精细化长期记忆分类的生产场景。
+AgentScope Python 2.x 的取舍值得借鉴：core 只保存 session-local `AgentState` 和 evidence offload，不内置跨会话抽取/召回/过期策略。agent-os 可以把 `SessionMemory`、`EvidenceStore`、`LongTermMemory` 拆成 ABC：本地代理用文件/SQLite/MemPalace/TencentDB Agent Memory；Web 分布式代理用 DB/object store/vector backend。这样不会让本地 CLI 的轻量 memory 和 SaaS 多租户的长期 memory 绑死在同一实现里。
 
 **如果你在做个人长期助手，要求零云依赖且不介意存储增长 → raw verbatim + ChromaDB（MemPalace 模式）**
 核心取舍：不做 LLM 提取换取零 API 成本和零信息损失。LongMemEval R@5 96.6% 证明"存原文 + 好的 embedding"在检索质量上超过大多数带 LLM 提取的系统。代价是存储量随对话线性增长（无剪枝），以及没有注入防护（任何内容可写入）。适合：数据隐私敏感、离线运行、学术/研究场景、或者你就是想让 AI 记住每一句话。如果需要精确结构化信息（用户偏好、关系图谱），MemPalace 的 KG 工具可以叠加在 verbatim 层之上。
+
+**如果你在做可替换 memory 平台，而不是单一记忆应用 → backend/source contract（MemPalace v3.4 模式）**
+核心取舍：把 Chroma/pgvector/Qdrant/SQLite exact 等后端统一到 `BaseBackend` / `BaseCollection`，再用 `PalaceRef` 和 namespace isolation 区分本地/服务端隔离边界。source adapter 侧用 `SourceRef` / `DrawerRecord` / `AdapterSchema` 声明 ingest 能力。代价是 contract 和 conformance suite 必须持续维护，且 MemPalace 当前 first-party source miner 迁移还未完全闭合。
+
+**如果你在做本地代码代理或长任务 agent，工具结果很大但又必须保留证据 → evidence store + 符号地图（TencentDB Agent Memory 模式）**
+核心取舍：不把完整工具结果长期塞进 context，而是写入 evidence store；prompt 里只放 L1 摘要、L2 MMD 任务地图、scene navigation 和可展开 handle。它比纯摘要更可导航，比 raw verbatim 全量注入更省 token。代价是需要额外 map builder、recall 工具预算和质量观测，尤其要监控 `node_mapping` 覆盖率、fallback/skip 率和额外 tool call 次数。
 
 ---
 
@@ -112,7 +124,7 @@ Markdown 保留人类可读性和可干预性，向量索引解决规模化检�
 - **后台 review agent 的成本失控**：Nudge 机制（Hermes Agent）fork 独立 AIAgent 后台审查记忆是优雅的设计，但在高频短对话场景（如群聊 gateway）nudge_interval 设小了会大量并发 review agent，token 消耗难以预估。上线前需根据预期对话频率仔细调参，并监控 review agent 的调用量。
 - **多 provider 幻觉**：允许同时激活多个记忆后端看似功能丰富，实际上会导致工具 schema 膨胀、LLM 在记忆工具选择上混乱，还要处理多后端数据一致性。Hermes Agent 用单 provider 约束（`_has_external` flag）明确拒绝第二个外部 provider，是工程上的务实取舍。
 - **raw verbatim 的存储膨胀**：不做提取 = 不丢失信息，但也意味着每条对话都占存储。MemPalace 的 ChromaDB palace 目录会随使用时间线性增长，没有自动过期或剪枝。长期运行后 L1 的 MAX_DRAWERS=15 硬截断会越来越遗漏重要历史——应周期性手动归档（`mempalace_delete_drawer`）或自建剪枝脚本。
-- **不提取不代表不失真**：raw verbatim 存储仍然存在分块策略引入的失真。MemPalace 的 `_chunk_by_exchange()` 只保留 AI 响应前 8 行，长响应后半段永久丢失。这违反了"No summaries. Ever."的哲学——实际上是在分块层做了隐性截断。上线前务必评估你的对话长度分布，必要时调大行数限制或改用段落分块。
+- **不提取不代表没有分块风险**：MemPalace 当前 `_chunk_by_exchange()` 已改为保留完整 AI 响应，并在超过 `chunk_size` 时拆成连续 drawers，不再有“前 8 行”硬截断。但 raw verbatim 仍依赖 chunk size、min chunk size、chunk metadata 和检索 rerank 质量；上线前要用真实长对话验证分块后是否还能召回完整证据链。
 
 ### 记忆生命周期管理
 
@@ -120,18 +132,18 @@ Markdown 保留人类可读性和可干预性，向量索引解决规模化检�
 
 | 策略 | 做法 | 代表 | 适合 |
 |------|------|------|------|
-| 无维护 | 只写不管 | OpenHarness | 短期项目、实验 |
+| 结构化文件 + 后台整理 | Markdown 记忆保留人工可读性，frontmatter 提供 TTL/disabled/supersedes，Auto-Dream 定期整理、剪枝、更新索引 | OpenHarness | 长期本地 agent、SDK + 产品壳分层的个人助手 |
 | 手动维护 | 用户自己编辑/删除 | Claude Code MEMORY.md | 个人工具 |
 | 信号调整 | 纠正/强化自动改置信度 | DeerFlow | 需要从对话中学习的系统 |
-| 定期归档 | 后台 agent 定期整理+剪枝 | Claude Code Auto-Dream | 长期运行的生产 agent |
+| 定期归档 | 后台 agent 定期整理+剪枝 | OpenHarness Auto-Dream | 长期运行的生产 agent |
 | 时态过期 | 事实自带有效期，过期自动失效 | MiroFish Zep | 信息时效性强的场景 |
 | 轮次触发 review | 每隔 N 轮 fork 独立 AIAgent 在后台自主回顾并写入记忆，主对话不感知 | Hermes Agent Nudge | 需要持续被动积累记忆、不想依赖 agent 主动触发的场景 |
 | 无自动维护（手动删除） | raw verbatim 只增不减，MCP 提供 `mempalace_delete_drawer` 手动删除；KG 的 `invalidate()` 标记事实失效而不删除，保留历史 | MemPalace | 存储空间充裕、数据完整性优先、接受人工定期维护的场景 |
-| 无自动维护 + 滑动 TTL 过期 | Redis 后端支持 `key_ttl` 参数，每次读写后调用 `_refresh_session_ttl` 刷新全部 session 相关 Key 的 TTL（滑动窗口，非固定过期）；两层记忆均无自动剪枝，但 Working Memory 可通过 TTL 实现自然淘汰 | AgentScope RedisMemory | 需要 Redis 作为 session 存储、对话稀疏（希望闲置会话自动清理）、但不需要跨 session 持久化的场景 |
+| 符号地图 + evidence 冷热分层 | 大 payload 留在 refs/scene blocks，当前 prompt 注入 MMD/scene navigation；history MMD 在上下文压力下按预算降级，active MMD 需要额外归档策略 | TencentDB Agent Memory | 工具调用密集的长任务，本地代理优先；分布式 Web 形态需替换为 object store + DB index |
 
 **关键教训**：没有维护的记忆系统最终会变成垃圾堆。记忆越多 ≠ 越有用——过时、矛盾、低质量的记忆会主动伤害 agent 表现。
 
-**Claude Code 的 Auto-Dream 是目前最成熟的自动维护方案**：条件触发（24h + 5 会话），4 阶段归档（Orient → Gather → Consolidate → Prune），forked subagent 不阻塞主流程。
+**OpenHarness 的 Auto-Dream 是目前最成熟的自动维护方案**：条件触发后 fork 后台 agent，按 Orient → Gather → Consolidate → Prune/index 四阶段整理 memory，并提供 lock、backup、preview、rollback、diff metadata。注意它主要靠 prompt 约束“只改 memory 目录”，并用备份/差异/锁做护栏，不是 OS 级强沙箱。
 
 **Hermes Agent 的 Nudge 是被动积累的补充路径**：不依赖 agent 主动判断"应该写记忆"，而是每隔固定轮次后台 fork review agent 自主决策。适合对话节奏不规律、主 agent 记忆写入率偏低的场景。两种机制不互斥：Auto-Dream 负责定期整理，Nudge 负责持续捕获增量——如果自建生产 agent，可以组合使用。
 
@@ -154,7 +166,8 @@ Hermes Agent 的 8 个外部 provider 覆盖了当前主流的记忆后端技术
 
 ## 相关模式
 
-- [[state-module-tree-serialization]] — memory 作为状态树子模块参与统一保存/恢复
+- [[state-module-tree-serialization]] — 历史 AgentScope 1.x 模式；当前 2.x 不再以内置 memory 状态树作为长期记忆路径
+- [[symbolic-context-map-progressive-recall]] — evidence-backed 符号地图 + 按需召回
 
 ## L2 详情
 
@@ -164,3 +177,4 @@ Hermes Agent 的 8 个外部 provider 覆盖了当前主流的记忆后端技术
 - [[memory-system--hermes-agent]]
 - [[memory-system--mempalace]]
 - [[memory-system--agentscope]]
+- [[memory-system--tencentdb-agent-memory]]

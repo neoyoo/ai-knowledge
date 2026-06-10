@@ -3,27 +3,38 @@ title: "Evaluation & Observability — DeerFlow"
 category: L2
 parent: "[[evaluation-observability]]"
 source: deer-flow
-source_version: "2.0"
+source_version: "v2.0-m1-rc2-11-g16391e35"
 confidence: high
 created: 2026-04-07
-updated: 2026-04-07
+updated: 2026-06-10
 ---
 
 ## 概述
 
-DeerFlow 的可观测性以 LangGraph 原生 SSE 流式输出为核心，提供模型 token、工具调用、subagent 任务状态的实时可见性。独特之处在于两个隐式评估机制：memory 置信度分数作为轻量级质量信号，`LoopDetectionMiddleware` 作为运行时自评估守卫。整体偏向实时观测，无结构化遥测框架。
+DeerFlow 的可观测性已经从“LangGraph SSE 实时流”扩展为 **RunJournal + RunEventStore + Gateway history API**。SSE 仍负责实时输出；RunJournal 记录 human/AI/tool/middleware 事件、trace 和 token usage；RunEventStore 支持 memory/db/jsonl 三类存储。它仍不是 OpenTelemetry，也不持久化每个 token chunk，但“仅实时可观测、无法历史回溯”的旧结论已经过期。
 
 ## 架构分析
 
 ### SSE 流式事件
 
-DeerFlow 通过 LangGraph Server 的 SSE endpoint 推送细粒度事件流，客户端可实时观测 agent 内部状态：
+DeerFlow 通过 Gateway 暴露的 LangGraph-compatible SSE endpoint 推送细粒度事件流，客户端可实时观测 agent 内部状态：
 
 - `model_tokens`：LLM 输出 token 流（逐字显示效果）
 - `tool_call_start` / `tool_call_end`：工具调用起止，含工具名和参数
 - `task_started` / `task_running` / `task_completed`：subagent 任务生命周期事件
 
 所有事件都携带 `thread_id`，前端可按 thread 隔离显示。
+
+### RunJournal / RunEventStore
+
+DeerFlow 运行时新增了完成态事件与 trace 存储：
+
+- `backend/packages/harness/deerflow/runtime/events/store/base.py:17-79` — messages + traces 统一存储接口
+- `backend/packages/harness/deerflow/config/run_events_config.py:21-33` — `memory` / `db` / `jsonl` 三种 run event store
+- `backend/packages/harness/deerflow/runtime/journal.py:182-223`、`:282-293`、`:333-345`、`:478-497`、`:572-585` — 记录 human / AI / tool / middleware / token usage
+- `backend/app/gateway/routers/thread_runs.py:339-438` — 暴露 run messages、events、token usage API
+
+边界：`RunJournal` 明确不实现 `on_llm_new_token`，所以它不是 token-stream durable replay；它保存的是完成后的消息、trace 与 usage。
 
 ### Memory 置信度作为质量信号
 
@@ -66,10 +77,11 @@ DeerFlow 通过 LangGraph Server 的 SSE endpoint 推送细粒度事件流，客
 - **无结构化遥测**：不支持 OpenTelemetry，无法对接 Jaeger、Datadog 等可观测性平台
 - **无成本追踪**：不记录 token 用量对应的费用，无法做 LLM 成本分析
 - **无自动化 eval 框架**：没有 benchmark suite、golden dataset 对比或批量评测能力
-- **仅实时可观测**：SSE 事件不持久化，无法做历史 trace 回溯分析
+- **非 OTel 标准**：RunJournal / RunEventStore 是 DeerFlow 自有事件模型，不是 OpenTelemetry span 体系
+- **无 durable token-stream replay**：SSE 可通过内存 bridge 做有限 Last-Event-ID 重连，但 token chunk 不落持久化事件库
 - **置信度更新规则简单**：memory confidence 的更新逻辑为启发式规则，缺乏统计严谨性
 
 ## 来源
 
-- 源码版本：DeerFlow 2.0 (bytedance/deer-flow)
+- 源码版本：`v2.0-m1-rc2-11-g16391e35`
 - 分析深度：源码级

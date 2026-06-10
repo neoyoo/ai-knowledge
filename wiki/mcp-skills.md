@@ -3,7 +3,7 @@ title: MCP & Skills
 aliases: [MCP, skills, 扩展协议, extension protocol]
 category: L1
 created: 2026-04-06
-updated: 2026-04-15
+updated: 2026-06-10
 relations:
   - target: "[[tool-system]]"
     type: extends
@@ -11,7 +11,7 @@ relations:
     type: alternative
   - target: "[[multi-agent]]"
     type: depends_on
-    note: "AgentScope 的传输层/会话策略正交分离使不同子 agent 可独立挂载不同 MCP server，是 multi-agent 工具隔离的实现基础；agentscope/mcp/_toolkit.py: register_mcp_client(group_name=...) 支持按 agent 组划分工具集"
+    note: "AgentScope 2.x 的 `ToolGroup` 可同时包含 tools、skills 和 MCP clients，不同 agent/session 可通过 workspace/toolkit 装配暴露不同 MCP server，是 multi-agent 工具隔离的实现基础"
 sources: [claude-code, openharness, deer-flow, hermes-agent, agentscope]
 ---
 
@@ -30,9 +30,9 @@ sources: [claude-code, openharness, deer-flow, hermes-agent, agentscope]
 
 | 维度 | Claude Code | OpenHarness | DeerFlow | Hermes Agent | AgentScope |
 |------|------------|-------------|----------|-------------|-----------|
-| 核心设计 | 按抽象层次拆成三种形态：MCP（协议接入层）、Skills（工作流模板层）、Plugins（生态封装层），三者分工明确互不混淆，MCP 解决"接什么工具"，Skills 解决"怎么做任务"，Plugins 解决"如何打包分发" | MCP 通过 Python `mcp` SDK 连接 stdio 服务器，每个工具包装为 `McpToolAdapter`（命名规则 `mcp__servername__toolname`）；Skills 是带可选 YAML frontmatter 的 `.md` 文件；两者通过统一 `plugin.json` 集成，兼容 Claude Code 插件生态 | `MultiServerMCPClient` 管理多服务器连接（支持 stdio/sse/http 三种 transport），引入延迟工具注册解决 MCP token 膨胀；Skills 用带 YAML frontmatter 的 Markdown 文件定义，支持 `skill_manage` 工具自动创建新 skill，实现自我进化 | **双向 MCP**：既作为 MCP Server 将自身会话暴露为 10 个标准工具（供 Claude Code/Cursor/Codex 调用），又作为 MCP Client 消费外部服务器工具；Skills 系统独立，带完整包管理器（Skills Hub）；三层完全解耦 | 独立的 MCP 客户端层（`agentscope/mcp/`），提供 StdIO/SSE/StreamableHTTP 三种传输 × Stateful/Stateless 两种会话策略，共 5 个具体客户端类；MCP 工具包装为 `MCPToolFunction` 可调用对象，通过 `Toolkit.register_mcp_client()` 注册后与普通 Python 函数工具共享同一调度路径；无独立 Skills 系统，MCP 工具即扩展入口 |
-| 关键特点 | MCP 工具包装为标准 Tool 接口，进入同一套权限/hook/transcript 流程；Skills 支持参数化（`arguments` + `substituteArguments`）和模型覆盖；子 agent 可声明专属 MCP server 集合实现工具级隔离 | `plugin.json` 将 skills、commands、hooks、MCP 配置聚合为单一 manifest，分发安装体验极简；`${CLAUDE_PLUGIN_ROOT}` 变量替换使插件路径可移植；Skills 纯 markdown 格式无代码门槛；复用 `.claude-plugin/plugin.json` 规范，Claude Code 插件可直接在 OpenHarness 中使用 | 延迟工具注册唯一性（分析过的所有项目中唯一将 MCP 工具按需检索的实现）；Skill 自进化（agent 完成复杂任务后自动创建/更新 skill 文件）；20 个内置 skill 覆盖多场景（PPT 生成/前端设计/数据分析）；内置 OAuth 支持 | MCP Server 使用 EventBridge（200ms 轮询 + mtime 双重检查，空闲 CPU 开销接近零）；MCP Client 专用后台 event loop + 每服务器独立 asyncio.Task + 5 次指数退避重连；Skills Hub 安全管道（隔离→正则扫描→信任分级→安装+锁文件）；SKILL.md frontmatter 支持平台过滤/条件注入/环境变量声明；77 个内置 + 45 个可选 skill | 工具粒度精细控制（白名单/黑名单/preset_kwargs/postprocess_func/namesake_strategy 五维度）；多模态内容自动转换（MCP Text/Image/Audio/EmbeddedResource → AgentScope 消息块）；按 MCP server 维度批量卸载工具（`remove_mcp_clients`）；`MCPToolFunction` 双模式执行（有状态复用 session / 无状态每次重建）；`AsyncExitStack` 管理多层上下文生命周期 |
-| 局限 | MCP server 崩溃后无自动重连；Skills 和 Commands 同名按优先级静默覆盖，缺乏冲突检测；Plugin marketplace 是中心化信任模型 | 仅支持 stdio MCP 传输，不支持 HTTP/SSE/WebSocket 远程传输；Skills 无动态参数支持，每个 skill 只能执行固定逻辑；修改 `.md` 文件后需重启进程才能生效 | Skills 无结构化参数（无参数校验或自动补全）；Skill 自进化质量不可控（无评审或测试机制）；延迟工具注册增加调用轮次（需先调 `tool_search` 再调实际工具） | 审批响应是"尽力而为"（best-effort），无完整 IPC 回路；`TRUSTED_REPOS` 硬编码仅 2 个仓库；动态工具发现依赖 MCP SDK 版本特性，版本不符时退化为静态列表；Skills 无 FTS5 索引，百条以上 skill 时系统提示 token 开销显著 | 无状态客户端每次调用重建 session，无连接池，高频调用延迟高；多个有状态客户端关闭必须严格 LIFO（上游 MCP SDK 已知问题 #577）；工具列表永久缓存无 TTL，动态工具变更不感知；`BlobResourceContents`（二进制资源）未实现（代码中有 TODO）；`enable_funcs`/`disable_funcs` 互斥（无法组合使用）；不支持 MCP Resources 和 Prompts 两种能力 |
+| 核心设计 | 按抽象层次拆成三种形态：MCP（协议接入层）、Skills（工作流模板层）、Plugins（生态封装层），三者分工明确互不混淆，MCP 解决"接什么工具"，Skills 解决"怎么做任务"，Plugins 解决"如何打包分发" | MCP 通过 Python `mcp` SDK 连接 stdio 服务器，每个工具包装为 `McpToolAdapter`（命名规则 `mcp__servername__toolname`）；Skills 是带可选 YAML frontmatter 的 `.md` 文件；两者通过统一 `plugin.json` 集成，兼容 Claude Code 插件生态 | `MultiServerMCPClient` 管理多服务器连接（支持 stdio/sse/http 三种 transport），引入延迟工具注册解决 MCP token 膨胀；Skills 用带 YAML frontmatter 的 Markdown 文件定义，支持 `skill_manage` 工具自动创建新 skill，实现自我进化 | **双向 MCP**：既作为 MCP Server 将自身会话暴露为 10 个标准工具（供 Claude Code/Cursor/Codex 调用），又作为 MCP Client 消费外部服务器工具；Skills 系统独立，带完整包管理器（Skills Hub）；三层完全解耦 | 统一 `MCPClient` + `StdioMCPConfig`/`HttpMCPConfig` + `is_stateful`；MCP tool 包装成 `MCPTool` 后与普通 `ToolBase` 一起进入 `Toolkit` / `ToolGroup`；Skills 通过 `SkillLoader` 进入 prompt-index，并由 `SkillViewer` 按需读取完整内容 |
+| 关键特点 | MCP 工具包装为标准 Tool 接口，进入同一套权限/hook/transcript 流程；Skills 支持参数化（`arguments` + `substituteArguments`）和模型覆盖；子 agent 可声明专属 MCP server 集合实现工具级隔离 | `plugin.json` 将 skills、commands、hooks、MCP 配置聚合为单一 manifest，分发安装体验极简；`${CLAUDE_PLUGIN_ROOT}` 变量替换使插件路径可移植；Skills 纯 markdown 格式无代码门槛；复用 `.claude-plugin/plugin.json` 规范，Claude Code 插件可直接在 OpenHarness 中使用 | 延迟工具注册唯一性（分析过的所有项目中唯一将 MCP 工具按需检索的实现）；Skill 自进化（agent 完成复杂任务后自动创建/更新 skill 文件）；20 个内置 skill 覆盖多场景（PPT 生成/前端设计/数据分析）；内置 OAuth 支持 | MCP Server 使用 EventBridge（200ms 轮询 + mtime 双重检查，空闲 CPU 开销接近零）；MCP Client 专用后台 event loop + 每服务器独立 asyncio.Task + 5 次指数退避重连；Skills Hub 安全管道（隔离→正则扫描→信任分级→安装+锁文件）；SKILL.md frontmatter 支持平台过滤/条件注入/环境变量声明；77 个内置 + 45 个可选 skill | stdio MCP 必须 stateful，HTTP MCP 可 stateful/stateless；MCP tool name 标准化为 `mcp__server__tool`；完整保留 MCP inputSchema（含 `$defs`/union）；`readOnlyHint` 接入权限语义；Skill 只注入摘要和目录，完整内容延迟读取 |
+| 局限 | MCP server 崩溃后无自动重连；Skills 和 Commands 同名按优先级静默覆盖，缺乏冲突检测；Plugin marketplace 是中心化信任模型 | 仅支持 stdio MCP 传输，不支持 HTTP/SSE/WebSocket 远程传输；Skills 无动态参数支持，每个 skill 只能执行固定逻辑；修改 `.md` 文件后需重启进程才能生效 | Skills 无结构化参数（无参数校验或自动补全）；Skill 自进化质量不可控（无评审或测试机制）；延迟工具注册增加调用轮次（需先调 `tool_search` 再调实际工具） | 审批响应是"尽力而为"（best-effort），无完整 IPC 回路；`TRUSTED_REPOS` 硬编码仅 2 个仓库；动态工具发现依赖 MCP SDK 版本特性，版本不符时退化为静态列表；Skills 无 FTS5 索引，百条以上 skill 时系统提示 token 开销显著 | Stateless HTTP 高频调用连接开销高；工具列表缓存无 TTL；当前主要接入 MCP tools，resources/prompts 未成为 Toolkit 一等抽象；Skill 是软约束，关键流程仍应升级为 Tool/MCP；MCP server 进程权限和环境变量隔离需由 workspace/deployment 处理 |
 
 ## 设计权衡
 
@@ -57,10 +57,10 @@ sources: [claude-code, openharness, deer-flow, hermes-agent, agentscope]
 - **agent 需要被其他 AI 工具接入（Claude Code/Cursor/Codex 等）** → 实现 MCP Server 侧，将 agent 的核心能力（会话读写、事件轮询、审批响应）暴露为标准工具。EventBridge 轮询 + mtime 双检的模式是空闲时 CPU 开销最低的实现——轮询间隔 200ms 但实际 DB 读取只在文件变化时触发。
 - **需要管理 skill 安全合规（团队/平台场景）** → 采用隔离-扫描-安装三段式管道：先写隔离目录，正则威胁扫描（凭证外泄/命令注入/反弹 shell/持久化植入/Unicode 注入）通过后再移入正式目录；信任分级（builtin > trusted > community > agent-created）决定对 `caution`/`dangerous` verdict 的处置策略。不要将所有来源平等对待。
 - **Skills 数量增长后发现效率下降** → 引入条件式注入：`fallback_for_toolsets`（当更强工具存在时不显示）+ `requires_tools`（依赖工具不可用时不显示），保证系统提示中只出现当前上下文可用的 skill，避免 token 膨胀和模型幻觉调用。
-- **同一 agent 需要混用多种传输方式的 MCP server（本地进程 + 远端 HTTP 服务并存）** → 采用传输层与会话策略正交分离架构（AgentScope 模式）：`StdIOStatefulClient` 管本地进程（subprocess stdio），`HttpStatefulClient`/`HttpStatelessClient` 管远端 HTTP；各自独立实例化，共享同一 `Toolkit` 注册路径。好处是增加新传输类型只需实现一个最小子类，调度层无感知。
-- **需要对 MCP 工具做精细权限控制（不同 agent/任务只暴露部分工具）** → 在 `register_mcp_client()` 时使用白名单/黑名单过滤（`enable_funcs`/`disable_funcs`）+ `preset_kwargs_mapping`（为特定工具预置 auth token 等参数）；不要在工具调用层做过滤——注册层过滤是 O(1)，调用层过滤每次执行都要判断且容易遗漏。AgentScope 的 `namesake_strategy`（raise/override/skip/rename）解决多 server 同名工具冲突，推荐默认用 `raise` 让冲突显式暴露。
-- **MCP 工具返回多模态内容（图片、音频）需要下游 agent 直接消费** → 在 MCP client 层做内容类型转换（AgentScope 模式：`_convert_mcp_content_to_as_blocks()` 将 Text/Image/Audio/EmbeddedResource 映射为 agent 消息块体系），而非让每个下游 agent 自己解析 `mcp.types.CallToolResult`。统一转换层使 MCP 工具与本地工具的返回格式一致，agent loop 无需区分工具来源。
-- **需要动态热插拔 MCP server（运行时添加或移除某个 server 的全部工具）** → 在注册时为每个 MCP server 设置唯一 `group_name`，利用 `RegisteredToolFunction.mcp_name` 字段支持按 server 维度批量卸载（AgentScope 的 `remove_mcp_clients(client_names)`）。注意：工具列表缓存无 TTL，移除后重新挂载同一 server 时需手动触发 `list_tools()` 刷新，否则可能使用过期工具列表。
+- **同一 agent 需要混用本地 stdio 和远端 HTTP MCP** → 采用统一 client + stateful flag（AgentScope 2.x 模式）：`MCPClient(mcp_config=StdioMCPConfig(...), is_stateful=True)` 处理本地进程，`MCPClient(mcp_config=HttpMCPConfig(...), is_stateful=True/False)` 处理远端 HTTP。调度层只看 `MCPTool`，不关心底层传输。
+- **需要按 agent/session 暴露不同 MCP 和 Skills** → 用 workspace / ToolGroup 作为扩展边界，而不是全局 MCP 池。AgentScope 2.x 的 `ToolGroup` 同时包含 tools、skills 和 mcps，适合让 worker agent 只看到自己需要的扩展。
+- **MCP 工具返回多模态内容（图片、音频）需要下游 agent 直接消费** → 在 tool adapter / formatter 层统一转换，而不是让每个 agent 自己解析 `mcp.types.CallToolResult`。AgentScope 2.x 的 `MCPTool` 先转为 `ToolChunk`，formatter 再按 provider 能力投影 data block。
+- **需要动态热插拔 MCP server** → 当前 AgentScope 2.x 的工具列表缓存无 TTL，适合相对稳定的 workspace MCP 配置；若 agent-os 要支持热插拔，应在 `MCPClient` 上补充 explicit refresh / TTL / server capability version。
 
 ### 常见陷阱
 

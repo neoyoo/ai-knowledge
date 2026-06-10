@@ -3,10 +3,10 @@ title: "Memory System — MemPalace"
 category: L2
 parent: "[[memory-system]]"
 source: mempalace
-source_version: "latest (March 2026)"
+source_version: "v3.4.0"
 confidence: high
 created: 2026-04-09
-updated: 2026-04-09
+updated: 2026-06-10
 relations:
   - target: "[[memory-system]]"
     type: implements
@@ -16,13 +16,15 @@ relations:
 
 ## 概述
 
-MemPalace 是目前所有对比项目中**唯一坚持 raw verbatim storage 的记忆系统**：永远存原文，永远不做 LLM 摘要/提取，完全依赖 ChromaDB 向量语义搜索保证检索质量。其设计哲学是对行业主流（Mem0/Mastra/Supermemory 都用 LLM 提取记忆）的直接反驳——"simpler approach wins because it doesn't lose information"。LongMemEval R@5 96.6% 的零 API 成本得分是这一哲学的实证支撑。
+MemPalace v3.4.0 已经从单一的 **raw verbatim + ChromaDB** 记忆实现，演进为一个**可插拔 memory backend / source adapter 平台**。Raw verbatim 仍是默认 Chroma reference backend 的重要哲学，但当前更值得借鉴的边界是：`BaseBackend` / `BaseCollection` 存储契约、entry point backend registry、`PalaceRef` 隔离键、server-mode namespace isolation，以及正在成型的 source adapter contract。
+
+旧版结论“永远 ChromaDB、永远 raw 原文”需要收窄为：默认路径仍保留 ChromaDB 原文检索和 4 层渐进加载；v3.4.0 以后，原文保真变成 source adapter 的 `byte-preserving` / `declared_lossy` 能力声明，不再是所有来源和后端的无条件承诺。
 
 ---
 
 ## 架构概览
 
-```
+```text
 用户文件/对话
      │
      ▼
@@ -35,10 +37,10 @@ miner.py / convo_miner.py  ← chunking + room 自动分类
 ChromaDB ("mempalace_drawers")   ← 语义向量索引，verbatim 存储
      │
      ├── layers.py (MemoryStack)    ← 4 层读取接口（L0/L1/L2/L3）
-     ├── searcher.py                ← 语义搜索 + metadata 过滤
+     ├── searcher.py                ← 向量候选 + BM25 rerank / union fallback
      ├── palace_graph.py            ← Room 图遍历（Wings 作节点）
      ├── knowledge_graph.py         ← SQLite 时态 KG（独立于向量库）
-     └── mcp_server.py              ← 19 个 MCP 工具（Claude Code 集成）
+     └── mcp_server.py              ← 30 个 MCP 工具（Claude Code 集成）
 
 ~/.mempalace/
      ├── palace/          ← ChromaDB 持久化数据
@@ -54,6 +56,29 @@ Palace 空间隐喻:
   Room  ← 具体主题 slug（如 chromadb-setup / riley-college-apps）
   Drawer ← 单条 verbatim 内容单元（ChromaDB 的 document）
 ```
+
+### v3.4.0 架构校正：Backend / Source Contract
+
+新版本新增了正式后端契约：
+
+- `mempalace/backends/base.py:1`、`:233`、`:365` — `QueryResult` / `BaseCollection` / `BaseBackend` 等 typed contract
+- `pyproject.toml:61` — backend entry points 暴露 `chroma`、`pgvector`、`qdrant`、`sqlite_exact`
+- `mempalace/palace.py:139` — backend 选择优先级：显式参数 → config → env → auto-detect → 默认 `chroma`
+
+隔离模型也从“本地目录天然隔离”扩展为可声明能力：
+
+- `mempalace/backends/base.py:82` — `PalaceRef.id` 是必需隔离键，`namespace` 是 server-mode 额外分区
+- `mempalace/backends/qdrant.py:1074`、`mempalace/backends/pgvector.py:1012` — Qdrant / pgvector 声明 `supports_namespace_isolation`
+- `tests/test_backend_conformance.py:39` — local Chroma / SQLite 不声明 namespace isolation，本地隔离主要依赖 palace path
+
+Source adapter 也已经有 contract，但 first-party miner 尚未完全迁移：
+
+- `mempalace/sources/base.py:68`、`:108`、`:164` — `SourceRef` / `DrawerRecord` / `AdapterSchema`
+- `mempalace/sources/registry.py:60` — `mempalace.sources` entry point registry
+- `pyproject.toml:67` — source entry point group 已声明但当前为空
+- `mempalace/sources/base.py:9`、`mempalace/tests/test_sources.py:455` — first-party miners / source conformance 仍是 follow-up
+
+因此，MemPalace v3.4.0 的主线应从“Chroma raw memory”改为“默认 Chroma raw reference backend + 可替换 backend/source contract”。Conformance 也要分层表述：namespace/isolation conformance 已有共享测试，完整 backend 合约覆盖仍在推进。
 
 ---
 
@@ -78,16 +103,18 @@ Palace 空间隐喻:
 
 **MemoryStack 统一接口**：`wake_up()` = L0 + L1，`recall(wing, room)` = L2，`search(query)` = L3。调用方不需要知道底层分层细节。
 
-### 2. searcher.py — 语义搜索
+### 2. searcher.py — 语义搜索 + BM25 混合排序
 
 两个接口，职责分离：
 
 - `search()` — 直接打印，给 CLI 用，输出带边框的格式化文本，包含 wing/room/source/similarity
 - `search_memories()` — 返回 dict，给 MCP server 和程序调用，返回 `{query, filters, results: [{text, wing, room, source_file, similarity}]}`
 
-搜索流程：`chromadb.PersistentClient` → `col.get_collection("mempalace_drawers")` → `col.query(query_texts=[query], n_results=n, include=["documents","metadatas","distances"])` → 相似度 = `1 - distance`（ChromaDB L2 距离转余弦近似）。
+默认搜索流程仍以 ChromaDB 向量候选为入口：`chromadb.PersistentClient` → `col.get_collection("mempalace_drawers")` → `col.query(...)` → 距离转相似度。但当前版本不再是纯向量排序：候选会进入 `_hybrid_rank()`，按 `0.6 * vector_similarity + 0.4 * BM25_norm` 重新排序。
 
 **Metadata 过滤**（`searcher.py:36-51`）：wing + room 双条件用 `{"$and": [{"wing": wing}, {"room": room}]}` 合并，单条件直接 `{"wing": wing}` 或 `{"room": room}`，不过滤时不传 `where`。过滤在向量搜索前由 ChromaDB 完成，是纯 metadata 精确匹配而非语义匹配。
+
+**BM25 rerank / fallback**（`searcher.py:133-177`、`:345-357`、`:627-724`）：CLI path 和 MCP path 都会用 BM25 补 lexical 信号。`candidate_strategy="union"` 时还会从 backend lexical search 取 top-K 候选合并进 vector hits，按 `(_source_file_full, _chunk_index)` 做 chunk 级 dedup；如果设置了严格 `max_distance > 0`，BM25-only 候选会被跳过以保留向量阈值语义。
 
 ### 3. convo_miner.py — 对话 ingest 和分块策略
 
@@ -95,7 +122,7 @@ Palace 空间隐喻:
 
 **格式探测**（`convo_miner.py:57-65`）：统计文件中 `>` 开头行数，≥3 条则认为是对话格式走 `_chunk_by_exchange()`，否则 fallback 到段落分块。
 
-**`_chunk_by_exchange()` 细节**（`convo_miner.py:68-101`）：AI 响应最多取 8 行（`ai_lines[:8]`），join 成单行。chunk 最小 30 chars（`MIN_CHUNK_SIZE`），小于阈值丢弃。这意味着长 AI 响应被硬截断——原文的后半部分不进入该 drawer。
+**`_chunk_by_exchange()` 细节**（`convo_miner.py:175-232`）：一轮用户 turn + 随后的完整 AI 响应会按原行结构拼接；当内容超过 `chunk_size` 时，`_emit_bounded()` 拆成连续 drawers。当前源码明确保留完整 AI response，不再有旧版“只取前 8 行”的硬截断；`min_chunk_size` 只在整段过短时过滤噪声，通过阈值后连尾部小片段也会保留。
 
 **Room 自动检测**（`convo_miner.py:129-206`）：对话内容有 5 个预定义 room 类别（technical/architecture/planning/decisions/problems），每类 10-13 个关键词，统计每类词频，取最高分。默认 room 为 `"general"`。
 
@@ -160,9 +187,9 @@ Arc:     ARC:emotion->emotion->emotion
 
 ### 7. mcp_server.py — MCP 工具完整列表
 
-共 19 个工具（README 说 19 个，实际代码中 TOOLS dict 有 19 条目）：
+共 30 个工具（`mcp_server.py:2270-2734` 的 `TOOLS` dict）：
 
-**Read 工具（7 个）**：
+**Read 工具（9 个）**：
 - `mempalace_status` — 总览 + 向 AI 返回 PALACE_PROTOCOL 和 AAAK_SPEC（隐式教学）
 - `mempalace_list_wings` — 所有 wings 及 drawer 数量
 - `mempalace_list_rooms` — 指定 wing 的 rooms
@@ -170,10 +197,15 @@ Arc:     ARC:emotion->emotion->emotion
 - `mempalace_get_aaak_spec` — 返回 AAAK 方言规范
 - `mempalace_search` — 语义搜索，可选 wing/room 过滤
 - `mempalace_check_duplicate` — 按相似度阈值（默认 0.9）检查重复
+- `mempalace_get_drawer` — 按 ID 读取完整 drawer
+- `mempalace_list_drawers` — 分页列出 drawer
 
-**Write 工具（2 个）**：
+**Write / sync 工具（5 个）**：
 - `mempalace_add_drawer` — 存 verbatim 内容，写入前自动去重检查
 - `mempalace_delete_drawer` — 按 ID 删除 drawer
+- `mempalace_update_drawer` — 更新内容或 metadata
+- `mempalace_sync` — dry-run / apply 清理 gitignored、删除或移动来源对应的 drawers
+- `mempalace_reconnect` — 外部脚本修改 palace 后重连数据库
 
 **Knowledge Graph 工具（5 个）**：
 - `mempalace_kg_query` — 查实体关系（支持 as_of 时间点过滤）
@@ -182,14 +214,22 @@ Arc:     ARC:emotion->emotion->emotion
 - `mempalace_kg_timeline` — 实体时间线
 - `mempalace_kg_stats` — KG 统计
 
-**Graph 工具（3 个）**：
+**Graph / tunnel 工具（7 个）**：
 - `mempalace_traverse` — BFS 从 room 出发遍历连接
 - `mempalace_find_tunnels` — 找跨 wing 连接的 rooms
 - `mempalace_graph_stats` — 图结构统计
+- `mempalace_create_tunnel` — 显式创建跨 wing tunnel
+- `mempalace_list_tunnels` — 列出显式 tunnels
+- `mempalace_delete_tunnel` — 删除 tunnel
+- `mempalace_follow_tunnels` — 从 room 展开 tunnel 目标及 drawer previews
 
 **Agent Diary 工具（2 个）**：
 - `mempalace_diary_write` — AI 写私人日记（AAAK 格式），按 agent_name 隔离 wing
 - `mempalace_diary_read` — 读历史日记，按 `filed_at` 降序排列
+
+**Hook / checkpoint 工具（2 个）**：
+- `mempalace_hook_settings` — 查看或设置 silent save / desktop toast 行为
+- `mempalace_memories_filed_away` — 检查最近 palace checkpoint 是否保存
 
 **PALACE_PROTOCOL 隐式注入**（`mcp_server.py:92-99`）：`tool_status()` 的返回值中嵌入了 5 条行为规范（先查再说、不确定就查、每次会话写日记等），通过 wake-up 调用自动传递给 AI，无需 system prompt 工程。
 
@@ -251,7 +291,11 @@ Arc:     ARC:emotion->emotion->emotion
 
 ## 设计亮点
 
-**Raw verbatim 作为核心哲学**：mempalace 是唯一把"不做 LLM 提取"作为设计核心的系统，不是能力不足而是主动选择。`miner.py` 文件顶部注释写明 `"No summaries. Ever."` 这个哲学有实证支撑：LongMemEval R@5 96.6% 超过 Mem0（~85% with LLM）、Mastra（94.87% with LLM）。信息论角度：不抽取 = 不丢失，有损压缩永远比无损检索的信息量少。
+**Raw verbatim 作为默认 reference backend 哲学**：mempalace 仍把“不做 LLM 提取”作为 Chroma reference path 的核心选择。LongMemEval R@5 96.6% 支撑的是 raw mode，而不是 AAAK 或任意 source adapter。v3.4.0 后，这个哲学需要和 backend/source contract 一起理解：后端可替换，source adapter 需声明是否 byte-preserving 或 declared_lossy。
+
+**Backend contract + plugin registry**：`BaseBackend` / `BaseCollection` 将 query/get/add/delete、capability flags、PalaceRef isolation 抽成可测试契约；entry point 让 Chroma、pgvector、Qdrant、SQLite exact 后端按部署场景替换。这比“只能 ChromaDB”更接近生产 memory 平台。
+
+**Namespace isolation 可声明**：本地后端靠 palace path 隔离；Qdrant / pgvector 等 server-mode 后端通过 namespace + palace hash/table/collection 做额外隔离，并用 conformance tests 验证 isolation 行为。
 
 **PALACE_PROTOCOL 自注入**：`tool_status()` 的返回 JSON 中直接内嵌 PALACE_PROTOCOL 字符串（`mcp_server.py:92-99`），AI 调用 wake-up 时自动学会协议规范，无需手工系统提示工程。这是一种"在数据里教模型"的轻量内省机制。
 
@@ -275,9 +319,11 @@ Arc:     ARC:emotion->emotion->emotion
 
 **KG 与向量库脱节**：`knowledge_graph.py` 的 triples 和 ChromaDB 的 drawers 是两个独立数据存储，`source_closet` 字段是可选的软连接，没有强制一致性保证。KG 中的事实和向量库中的原文可能描述的是同一个事情但互相不知道，需要 AI 手动维护两者的关联（通过 MCP 工具）。
 
-**存储无增长上限**：raw verbatim 的代价是存储量随对话量线性增长。没有归档、剪枝、或自动过期机制（不像 Claude Code Auto-Dream 的 4 阶段 Prune 流程）。长期使用后 `~/.mempalace/palace/` 的 ChromaDB 体积可能显著膨胀，L1 的 MAX_DRAWERS=15 截断会越来越漏掉重要历史。
+**存储无增长上限**：raw verbatim 的代价是存储量随对话量线性增长。没有像 OpenHarness Auto-Dream 那样的后台归档/剪枝流程。长期使用后 `~/.mempalace/palace/` 的 ChromaDB 体积可能显著膨胀，L1 的 MAX_DRAWERS=15 截断会越来越漏掉重要历史。
 
-**`_chunk_by_exchange` 的 AI 响应截断**：`_chunk_by_exchange()` 只保留 AI 响应的前 8 行（`ai_lines[:8]`），长响应被硬截断。这破坏了 raw verbatim 的核心承诺——如果 AI 在第 9 行才给出关键答案，该信息被永久丢弃。
+**分块后仍需检索质量验证**：当前 `_chunk_by_exchange()` 已保留完整 AI 响应并按 `chunk_size` 分片，不再破坏 raw verbatim 承诺。但长响应被拆成多个 drawer 后，后续召回依赖 chunk metadata、BM25/vector rerank 和 dedup 质量；真实使用前仍要用长对话样本验证关键答案能否被召回。
+
+**Source adapter 迁移未完成**：v3.4.0 已有 `BaseSourceAdapter`、source registry 和 RFC002，但 first-party filesystem/conversation miners 尚未完全迁移。不能把 source conformance 写成已完成能力。
 
 **无注入防护**：相比 Hermes Agent 的 `_scan_memory_content()`（11 类威胁模式扫描），mempalace 的 `tool_add_drawer` 没有任何写入前校验。任何内容都直接进入向量库，prompt injection 攻击可以通过 `mempalace_add_drawer` 植入恶意记忆，下次 wake-up 时污染 L1。
 
@@ -288,13 +334,13 @@ Arc:     ARC:emotion->emotion->emotion
 | 维度 | mempalace | Claude Code | DeerFlow | Hermes Agent |
 |------|----------|-------------|----------|-------------|
 | 存储策略 | raw verbatim，永不摘要 | LLM 后台提取 → Markdown | LLM 结构化 → JSON | LLM 写入 → MEMORY.md |
-| 检索方式 | ChromaDB 向量搜索 | 词法匹配 | 置信度排序 | 全量注入（内置）+ 外部向量 |
+| 检索方式 | ChromaDB 向量候选 + BM25 rerank/union fallback | 词法匹配 | 置信度排序 | 全量注入（内置）+ 外部向量 |
 | 信息损失 | 无（存原文） | 有（LLM 摘要可能漏） | 有（提取失真） | 有（LLM 筛选） |
 | 结构化层 | KG（可选，SQLite） | 无 | JSON schema | 无（内置层） |
 | 空间隐喻 | Wing/Hall/Room/Drawer | 无 | 无 | 无 |
-| 跨 session 自我记录 | Agent Diary（MCP） | Auto-Dream | 无 | Nudge review |
+| 跨 session 自我记录 | Agent Diary（MCP） | Session Memory / 后台提取 | 无 | Nudge review |
 | 安全防护 | 无 | 无 | 无 | 11 类威胁扫描 |
-| 维护机制 | 无自动剪枝 | Auto-Dream（Prune 阶段） | 置信度降级 | Nudge review |
+| 维护机制 | 无自动剪枝 | Auto-Dream（Prune/index 阶段） | 置信度降级 | Nudge review |
 
 ---
 
@@ -302,8 +348,9 @@ Arc:     ARC:emotion->emotion->emotion
 
 - `mempalace/layers.py:76-177` — `Layer1.generate()`，L1 批量读取 + importance 排分 + 分组输出
 - `mempalace/layers.py:369-448` — `MemoryStack`，4 层统一接口
-- `mempalace/searcher.py:93-152` — `search_memories()`，MCP 语义搜索
-- `mempalace/convo_miner.py:54-101` — `chunk_exchanges()` + `_chunk_by_exchange()`，Q+A 配对分块
+- `mempalace/searcher.py:133-177` — `_hybrid_rank()`，向量相似度 + BM25 rerank
+- `mempalace/searcher.py:627-724` — `_merge_bm25_union_candidates()`，BM25 backend 候选合并
+- `mempalace/convo_miner.py:175-232` — `_chunk_by_exchange()` + `_emit_bounded()`，Q+A 配对分块且保留完整响应
 - `mempalace/convo_miner.py:129-206` — `detect_convo_room()`，5 类 room 自动分类
 - `mempalace/knowledge_graph.py:55-86` — SQLite schema，triples + valid_from/valid_to 时态字段
 - `mempalace/knowledge_graph.py:188-243` — `query_entity()`，时态查询 SQL
@@ -313,7 +360,7 @@ Arc:     ARC:emotion->emotion->emotion
 - `mempalace/dialect.py:545-590` — `compress()`，AAAK 有损摘要流水线
 - `mempalace/mcp_server.py:92-118` — `PALACE_PROTOCOL` + `AAAK_SPEC` 嵌入 status 响应
 - `mempalace/mcp_server.py:349-392` — `tool_diary_write()`，agent 日记
-- `mempalace/mcp_server.py:442-689` — `TOOLS` dict，19 个工具完整定义
+- `mempalace/mcp_server.py:2270-2734` — `TOOLS` dict，30 个工具完整定义
 - `mempalace/normalize.py:23-49` — `normalize()`，格式探测主入口
 - `mempalace/onboarding.py:266-315` — `_generate_aaak_bootstrap()`，生成 AAAK 实体注册表
 
@@ -322,5 +369,6 @@ Arc:     ARC:emotion->emotion->emotion
 ## 来源
 
 - 源码路径：`/Users/neo/Desktop/project/git/mempalace/`
+- 源码版本：`v3.4.0`
 - 分析深度：源码级（layers.py / searcher.py / convo_miner.py / knowledge_graph.py / palace_graph.py / dialect.py / mcp_server.py / onboarding.py / config.py / normalize.py / general_extractor.py / miner.py 全部核心模块）
 - benchmark 数据来源：`benchmarks/BENCHMARKS.md`（March 2026 数据）

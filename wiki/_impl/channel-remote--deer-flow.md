@@ -3,45 +3,50 @@ title: "Channel & Remote Interface — DeerFlow"
 category: L2
 parent: "[[channel-remote]]"
 source: deer-flow
-source_version: "2.0"
+source_version: "v2.0-m1-rc2-11-g16391e35"
 confidence: high
 created: 2026-04-07
-updated: 2026-04-07
+updated: 2026-06-10
 ---
 
 ## 概述
 
-DeerFlow 拥有同类项目中最完整的 channel 体系：Nginx 反向代理统一入口，三个后端服务各司其职，内置 Slack、Telegram、Feishu、WeCom 四个 IM 平台适配器，同时提供嵌入式 Python SDK（`DeerFlowClient`）和 ACP 协议用于跨 harness agent 互调。
+DeerFlow 的 channel 体系已经从“四个薄 IM adapter”演进为中心化 `ChannelService` / `ChannelManager` / `MessageBus`：七类 channel registry、topic 到 thread 映射、channel/user session override、skill whitelist、入站上传、出站 artifact attachment，以及 Feishu/WeCom streaming。当前生产 compose 是 Nginx + Frontend + Gateway（可选 provisioner）：Gateway 内嵌 LangGraph-compatible API/runtime，nginx 将 `/api/langgraph/*` 重写到 Gateway，而不是再运行独立 LangGraph Server 容器。
 
 ## 架构分析
 
-### 三服务 + Nginx 架构
+### Nginx + Gateway 内嵌 runtime 架构
 
-Nginx 监听 `:2026`，作为统一入口反向代理到三个后端：
+Nginx 监听 `:2026`，作为统一入口反向代理到 frontend 与 gateway：
 
 | 后端 | 端口 | 职责 |
 |------|------|------|
-| LangGraph Server | `:2024` | Agent runtime，处理 SSE 流式推理 |
-| Gateway API (FastAPI) | `:8001` | REST API，IM channel 入站、suggestions、thread 管理 |
+| Gateway API (FastAPI) | `:8001` | REST API、LangGraph-compatible API/runtime、IM channel 入站、suggestions、thread 管理 |
 | Next.js Frontend | `:3000` | Web UI |
+| Provisioner | 可选 | Kubernetes sandbox provisioner |
 
-路由规则由 `backend/docker/nginx.conf` 定义，`/langgraph/` 前缀路由到 LangGraph Server，其余 API 路由到 Gateway，根路径路由到 Next.js。
+路由规则由 `docker/nginx/nginx.conf` 定义。`/api/langgraph/*` 会先 rewrite 为 `/api/*`，再 proxy 到 Gateway；其余 API 同样进 Gateway，根路径路由到 Next.js。
 
-### IM Channel 适配器
+### IM Channel 适配器与 ChannelManager
 
-`backend/app/channels/` 下实现四个 IM 平台适配器，每个适配器包含：
+`backend/app/channels/` 下由 `ChannelService` 注册 channel，并由 `ChannelManager` 统一管理入站、出站、session merge 和附件安全：
 
 1. **Webhook 入站处理**：接收平台推送的消息事件，验证签名
 2. **消息解析**：将平台格式转换为统一的文本内容
 3. **LangGraph 调用**：通过 `ChannelService` 转发到 agent runtime
 4. **响应回写**：将 agent 输出通过平台 API 回送给用户
 
-四个平台的适配器结构基本对称，差异主要在认证方式和 API client：
+最新源码中 channel registry 覆盖七类 channel：`dingtalk`、`discord`、`feishu`、`slack`、`telegram`、`wechat`、`wecom`。四个平台适配器之外还包含更完整的 MessageBus / manager 组合：
 
-- **Slack**：Event API + OAuth Bot Token
-- **Telegram**：Bot API + Webhook
-- **Feishu (Lark)**：飞书开放平台 + 应用凭证
-- **WeCom (企业微信)**：企业微信回调 + CorpID/Secret
+- `backend/app/channels/service.py:20-28`、`:55-77` — 七渠道注册与生命周期
+- `backend/app/channels/message_bus.py:32-60`、`:64-110` — inbound files/topic 与 outbound attachments
+- `backend/app/channels/manager.py:54-62` — channel capabilities
+- `backend/app/channels/manager.py:469-516` — outputs-only attachment 安全边界
+- `backend/app/channels/manager.py:546-651` — inbound upload
+- `backend/app/channels/manager.py:700-769` — session layer merge、channel-user override、user-scoped run context
+- `backend/app/channels/manager.py:992-1172` — skill whitelist、stream/chat/commands
+
+边界：这不是完整通用授权系统；它提供的是 per-channel/per-user session、agent、skill/context 配置，以及 artifact 输入输出边界。
 
 ### 嵌入式 Python SDK
 
@@ -66,26 +71,30 @@ response = client.chat("Research the latest AI trends")
 
 ### 关键代码路径
 
-- `backend/app/channels/` — Slack/Telegram/Feishu/WeCom 四个 IM 适配器目录
+- `backend/app/channels/` — DingTalk/Discord/Feishu/Slack/Telegram/WeChat/WeCom 七个 channel 适配器
+- `backend/app/channels/service.py` — ChannelService 注册与生命周期
+- `backend/app/channels/manager.py` — ChannelManager，session merge / attachments / upload / slash command / skill whitelist
+- `backend/app/channels/message_bus.py` — inbound topic/files 与 outbound attachments
 - `deerflow/client.py` — DeerFlowClient 嵌入式 SDK 实现
 - `deerflow/tools/builtins/invoke_acp_agent_tool.py` — ACP 跨 harness 调用工具
-- `backend/docker/nginx.conf` — Nginx 路由规则，三服务反向代理配置
+- `docker/docker-compose.yaml` — Nginx/Frontend/Gateway/可选 provisioner 生产 compose
+- `docker/nginx/nginx.conf` — Nginx 路由规则，`/api/langgraph/*` rewrite 到 Gateway
 
 ## 设计亮点
 
-- **最完整的 channel 覆盖**：4 个 IM 平台 + Web UI + Python SDK + ACP，覆盖了从开发者到企业用户的全场景接入需求
+- **中心化 channel manager**：多平台差异被收敛到 ChannelManager / MessageBus，channel 层能处理 session override、skill whitelist、入站上传和出站 artifact
 - **嵌入式 SDK 无服务器运行**：`DeerFlowClient` 允许零基础设施启动，极大降低集成门槛
 - **ACP 协议实现跨 harness 互操作**：DeerFlow 可作为 meta-orchestrator 调度 Codex、Claude Code 等外部 agent，是同类项目中独有的能力
-- **Nginx 统一入口**：三服务对外只暴露单一端口，简化防火墙配置和 SSL 证书管理
+- **Nginx 统一入口**：frontend/gateway 对外只暴露单一端口，简化防火墙配置和 SSL 证书管理；LangGraph-compatible API 不再需要单独服务端口
 
 ## 局限性
 
-- **Channel 适配器偏薄**：当前适配器仅处理纯文本消息，不支持各平台的富交互元素（Slack Block Kit、Telegram InlineKeyboard 等）
+- **仍非通用权限系统**：channel 层有 session/agent/skill/context 配置，但不是完整 RBAC/ABAC 权限模型
 - **SSE 单向推送**：使用 Server-Sent Events 而非 WebSocket，无法实现双向实时通信（客户端无法主动推送）
-- **无 per-channel 权限模型**：不同 channel 的用户使用相同的 agent 权限，无法按渠道设置访问控制
+- **不是完整 RBAC/ABAC**：部分 channel 已有轻量访问限制（Slack/Telegram `allowed_users`、Discord `allowed_guilds`/`allowed_channels`），ChannelManager 也支持 session override；但这还不是跨渠道统一的角色/属性权限模型，仍需和 workspace/sandbox policy 联动
 - **IM 平台依赖平台侧 Webhook**：需要公网可达的 callback URL，本地开发需要 ngrok 等工具中转
 
 ## 来源
 
-- 源码版本：DeerFlow 2.0 (bytedance/deer-flow)
+- 源码版本：`v2.0-m1-rc2-11-g16391e35`
 - 分析深度：源码级

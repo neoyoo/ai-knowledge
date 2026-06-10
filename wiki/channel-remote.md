@@ -3,7 +3,7 @@ title: Channel & Remote
 aliases: [渠道, remote execution, multi-channel]
 category: L1
 created: 2026-04-06
-updated: 2026-04-25
+updated: 2026-06-10
 relations:
   - target: "[[query-loop]]"
     type: uses
@@ -29,9 +29,9 @@ sources: [claude-code, openharness, deer-flow, hermes-agent, agentscope]
 
 | 维度 | Claude Code | OpenHarness | DeerFlow | Hermes Agent | AgentScope |
 |------|------------|-------------|----------|-------------|-----------|
-| 核心设计 | Channel（MCP 子协议，解决外部消息通道异步接入）+ Remote Session（把云端 agent 实例折叠回本地 task 系统统一编排），两者共同将 agent 从终端内对话循环扩展为跨设备可恢复 agent runtime | Python 后端 + React/Ink TUI 前端通过 stdio JSON 协议通信的混合架构；`BridgeSessionManager` 管理长生命周期子进程；cron 系统通过 `RemoteTriggerTool` 支持定时触发 agent 执行；当前"远程"本质上是本地子进程管理 | Nginx 反向代理统一入口（`:2026`）三服务架构（LangGraph Server + FastAPI Gateway + Next.js），内置 Slack/Telegram/Feishu/WeCom 四个 IM 平台适配器，同时提供嵌入式 Python SDK（`DeerFlowClient`）和 ACP 协议跨 harness 互调 | `GatewayRunner` 单 asyncio 事件循环并发驱动 16 个平台适配器；`BasePlatformAdapter` 三抽象方法 + 可选 override 接口统一所有平台差异；session key 三维语义（DM/群组/thread，thread 默认共享）；`SessionResetPolicy` 四模式 + memory flush 前置；cron 文件锁 + SILENT_MARKER + Matrix E2EE 优先投递；6 种执行后端（local/Docker/SSH/Modal/Daytona/Singularity） | `realtime/` 模块提供基于 WebSocket 的双向流式实时对话通道，统一抽象 OpenAI / DashScope / Gemini 三家 Realtime API；定义三层事件体系（ModelEvents / ServerEvents / ClientEvents）解耦模型原生协议与前后端通信；`tts/` 模块独立提供语音合成通道，支持非流式和流式输入两种模式；两模块共同构成多模态实时交互层 |
-| 关键特点 | Channel 复用整套 MCP 基础设施（无需单独发明 IM 插件 runtime）；权限 relay 走结构化 typed notification 而非文本 regex（防止自然语言误触发）；`RemoteAgentTask` 把远程 session 折叠为本地 task，支持 `--resume` 跨 CLI 重启 | 混合语言架构（Python + Node.js React/Ink），stdio JSON 协议解耦，各语言专注擅长领域；cron 调度内置，JSON 存储简单可审计；`WorkSecret` 凭证编码为未来网络化扩展预留接口形态 | 最完整的 channel 覆盖（4 个 IM 平台 + Web UI + Python SDK + ACP）；嵌入式 SDK 无服务器运行（`DeerFlowClient` 零基础设施启动）；ACP 协议实现跨 harness 互操作（可作为 meta-orchestrator 调度外部 agent）；Nginx 统一入口简化运维 | 16 个平台 + 6 个执行后端，覆盖面最广；智能模型路由（每条消息自动在廉价/强模型间切换）；`_agent_cache` 按 session key 缓存 agent 实例（保全 prefix cache，避免 ~10x 额外费用）；平台感知 PII 脱敏（WhatsApp/Signal/Telegram 启用，Discord 排除保留 `<@user_id>` mention 语义）；typing 暂停机制解决 Slack 输入框锁定问题 | 三层事件体系通过命名约定（`model_` ↔ `agent_`）实现机械自动映射，`ServerEvents.from_model_event()` 用类名替换 + `model_dump()` + `model_validate()` 完成转换，新增事件类型无需手写映射；异步工具调用以 `asyncio.create_task` 派发，结果双路通知（Realtime API 继续对话 + outgoing_queue 广播前端）；`RealtimeModelBase` 抽象层把三家协议差异隔离在各自 `parse_api_message` 中，`RealtimeAgent` 层零感知；DashScope CosyVoice TTS 以 LCM(2,3)=6 字节边界进行 PCM+base64 双对齐；`cold_start_length` 参数控制首批 TTS 最低文本量，解决流式 LLM 输出接驳 TTS 时的冷启动停顿问题 |
-| 局限 | Channel 依赖 Claude.ai OAuth，纯 API key 用户无法使用；Remote session 要求 git repo + git remote；远程 session 只能 HTTP 轮询不能 WebSocket 推送 | 无 WebSocket 服务端，无 OAuth，无云端 channel；所谓"远程"是本地子进程管理；`WorkSecret` 机制已设计但未连接任何活跃网络端点；stdio JSON 通信在进程异常退出时缺乏健壮的重连机制 | Channel 适配器偏薄（仅处理纯文本，不支持富交互元素）；SSE 单向推送（无 WebSocket 双向通信）；无 per-channel 权限模型；IM 平台依赖平台侧 Webhook，本地开发需 ngrok 中转 | 所有适配器共享单进程 asyncio loop，WhatsApp Node.js bridge 阻塞可影响其他平台延迟；session key 不跨平台（同一用户 Telegram/Discord 是两个独立 session）；`_agent_cache` 无 LRU/TTL 驱逐，大量用户场景内存持续增长；cron 文件锁无法水平扩展到多机；所有会话共享同一 `TERMINAL_ENV`，无法为不同用户或平台配置不同执行后端 | DashScope Realtime 不支持 Tools（`support_tools = False`）；CosyVoice TTS 不支持并发多路合成（注释明确不能处理交叉消息）；OpenAI 并行工具调用有缺陷（`_tool_args_accumulator` 设计一次只能可靠处理一个工具调用，有 TODO 注释）；Session 生命周期薄弱（WebSocket 断开后无状态持久化或恢复，重连需从头建立 session）；`tts/` 与 `realtime/` 模块未集成，LLM 文字回复转 TTS 语音输出需用户自己写桥接逻辑；Gemini token 计数硬编码为 0，成本追踪不可用 |
+| 核心设计 | Channel（MCP 子协议，解决外部消息通道异步接入）+ Remote Session（把云端 agent 实例折叠回本地 task 系统统一编排），两者共同将 agent 从终端内对话循环扩展为跨设备可恢复 agent runtime | `src/openharness` core 提供 engine、commands、memory、channels、tasks；`ohmo/` 作为个人 agent 产品壳注入 workspace、personal memory、skills、plugins、gateway 和 session backend；channel core 通过 `MessageBus`/`ChannelManager` 解耦适配器与 agent runtime | Nginx + Frontend + Gateway；Gateway 内嵌 LangGraph-compatible API/runtime，`/api/langgraph/*` 由 nginx 重写到 Gateway；channel 层升级为 `ChannelService` / `ChannelManager` / `MessageBus`，统一处理七类 channel registry、topic/thread、session override、skill whitelist、入站上传和出站 artifact attachment | Gateway/CLI/TUI/Desktop 多入口共用本地 agent core：`GatewayRunner` 负责 16+ 平台适配器和 session reset；`tui_gateway` JSON-RPC 提供 `session.list`/`session.resume`；desktop 路由 `/:sessionId` 自动 resume 并在 gateway sleep/wake 后自愈 | Python 2.x 主线是 FastAPI app factory + session REST/SSE + MessageBus event replay/live fan-out + Redis session lock；旧版 `realtime/`/`tts/` 多模态通道已不代表当前源码 |
+| 关键特点 | Channel 复用整套 MCP 基础设施；权限 relay 走结构化 typed notification 而非文本 regex；`RemoteAgentTask` 把远程 session 折叠为本地 task，支持 `--resume` 跨 CLI 重启 | SDK/product 分层清楚：产品人格、个人 workspace、gateway 策略不污染 core runtime；`MessageBus` 用 inbound/outbound queue 把 channel 与 agent 解耦；`ohmo` 每个 chat/thread 维护 runtime bundle 并恢复 session snapshot | ChannelManager 能处理 outputs-only attachment 安全边界、upload、session merge、channel-user override、skill whitelist；`DeerFlowClient` 允许无服务器嵌入式运行；ACP 协议实现跨 harness 互操作 | 多平台覆盖最广；`_agent_cache` 保全 prefix cache；resume_pending 在 gateway 重启/关闭超时后持久化，下次启动或平台重连可自动续跑；desktop 先读本地 snapshot 再 gateway resume，避免路由刷新时空白闪烁；stream consumer 支持 draft/edit/fresh-final/fallback | SSE endpoint 先 replay buffered events 再 live subscribe，并含 heartbeat；Redis MessageBus 用 `SET NX EX` + heartbeat + token release 做 session 分布式锁；workspace/permission context 与 session runtime 绑定 |
+| 局限 | Channel 依赖 Claude.ai OAuth，纯 API key 用户无法使用；Remote session 要求 git repo + git remote；远程 session 只能 HTTP 轮询不能 WebSocket 推送 | core `MessageBus` 是进程内 queue，不是分布式 broker；ohmo channel/product 能力不能直接等同于 OpenHarness SDK 能力；远程多用户授权主要在产品壳处理 | 仍非通用 RBAC/ABAC 权限系统；SSE 单向推送；IM 平台依赖平台侧 Webhook，本地开发需 ngrok 中转；artifact/upload 边界需要和 sandbox/workspace 权限联动 | 所有平台适配器仍集中在单进程 gateway；cron/平台 reconnect/resume_pending 的复杂度高；desktop route resume 依赖前端本地状态、gateway JSON-RPC 和 state.db 三方一致 | 当前 Python 2.x 不再提供旧版 realtime/tts 源码路径；Local workspace manager 未用 `user_id` 参与 workdir 隔离；跨系统 AgentCard/A2A/Nacos 能力应看独立 `agentscope-java` |
 
 ## 设计权衡
 
@@ -44,6 +44,8 @@ sources: [claude-code, openharness, deer-flow, hermes-agent, agentscope]
 | Headless API + 独立前端 | Agent 暴露纯 REST/WebSocket API，前端独立构建 | 高（前端任意技术栈） | 高（API 设计、认证、限流） | 平台产品、第三方集成 |
 | 混合架构（Backend + Detachable TUI） | Python 后端 + Node.js React TUI 通过 stdio JSON 协议通信（OpenHarness 方案） | 中（TUI 可替换，但协议耦合） | 中高（两个 runtime + 协议维护） | 需要精美终端 UI 的开发工具 |
 | 单进程多平台网关（Gateway Runner） | 单 asyncio 事件循环并发驱动所有平台适配器，统一处理会话/安全/路由（Hermes Agent 方案） | 高（适配器可独立插拔，新平台只需实现三个方法） | 高（16 个平台适配器 + 重连/cron/session 管理全部集中） | 需要同时在多个 IM 平台上部署同一 agent 的个人/小团队 |
+| SDK core + product shell | Core runtime 保持通用，产品层注入 persona、workspace、memory、gateway policy | 高（同一 runtime 可服务多个产品） | 中（边界需要长期维护） | 同时建设 agent SDK 与自家 agent 产品 |
+| 服务化 session app + SSE replay | FastAPI/HTTP session API + SSE replay/live fan-out + 分布式锁 | 高（Web/多用户友好） | 中高（storage/bus/lock/workspace 都要抽象） | Web 分布式 agent、多人 session、远程 workspace |
 
 ### 场景决策指南
 
@@ -55,9 +57,15 @@ sources: [claude-code, openharness, deer-flow, hermes-agent, agentscope]
 
 **需要精美终端 UI 的开发工具** → 混合架构（参考 OpenHarness）。Python 做 agent 逻辑（生态丰富），Node.js/React/Ink 做 TUI（UI 组件丰富）。stdio JSON 协议解耦两端，TUI 甚至可以换成 Web UI 而不动后端。前提：两个进程的生命周期管理和重连逻辑必须写稳。
 
+**同时建设 runtime SDK 和自家 agent 产品** → SDK core + product shell（OpenHarness/ohmo）。core 只放 engine、tools、memory scan、channel bus、tasks；产品壳再注入 persona、personal memory、workspace、gateway policy 和私有 skills。agent-os 也应保持这一边界：local proxy agent 和 Web distributed agent 是两种 shell，不应污染同一个 core。
+
 **需要跨设备、跨 CLI 重启继续工作**（Claude Code Remote Session 场景）→ 考虑把远程 session 折叠为本地 task（`RemoteAgentTask` 模式），使 `--resume` 等本地能力自然适用，而不是为远程单独建一套编排路径。
 
+**需要 Web 分布式 session / 多用户 workspace** → 服务化 session app + SSE replay（AgentScope Python 2.x / DeerFlow）。核心抽象应包括 `SessionStore`、`MessageBus`、`WorkspaceManager`、`PermissionContext`、`RunController`，而不是把 HTTP handler 直接绑到 agent loop。SSE 可先作为单向 live/replay 通道，真正需要双向实时控制时再上 WebSocket。
+
 **需要同时接入多个 IM 平台（Slack + Telegram + Discord + 企业微信等）** → 单进程多平台网关（参考 Hermes Agent）。把所有平台差异下沉到 `BasePlatformAdapter`（三个抽象方法 + 可选 override），runner 层统一处理安全、会话、路由。关键：session key 的 DM/群组/thread 三维语义必须设计清楚——群组内是否 per-user 隔离、thread 是否共享都影响多人协作体验。
+
+**需要 desktop/Web route 直接指向历史 session** → route resume + local snapshot + gateway rebind（Hermes Desktop）。URL 路由的 id 应是 stored session id，不一定是当前 live runtime id；刷新或 sleep/wake 后先读本地 snapshot 保持 UI 稳定，再调用 gateway `session.resume` 绑定新的 live id。否则会出现“路由还在旧 session，但 gateway runtime 已丢”的 split-brain。
 
 **需要定时执行 agent 任务并投递到 IM 平台** → cron + 平台 live adapter 优先投递。纯 HTTP 投递无法处理 Matrix E2EE 房间（没有密钥），必须通过已建连的 live adapter 发送。同时引入文件锁防止 gateway、daemon、systemd timer 三者同时触发 tick（`fcntl` 文件锁，单机串行保证）。需要审计但不想打扰用户的任务用 `SILENT_MARKER` 标记：agent 输出本地保存，但不向平台投递。
 
@@ -76,6 +84,8 @@ sources: [claude-code, openharness, deer-flow, hermes-agent, agentscope]
 **Agent 实例重建导致 prompt cache 命中率骤降**：每条消息重新创建 `AIAgent` 实例，会使支持 prefix caching 的提供商（如 Anthropic）的系统提示缓存完全失效，导致 token 费用约增加 10 倍。解法：按 session key 缓存 agent 实例（`_agent_cache`），缓存失效条件改为 config 签名变化（config.yaml 改动），而非时间 TTL 或请求次数。
 
 **Session 重置前未 flush 记忆导致上下文丢失**：daily/idle 重置触发时，若直接清空对话历史，用户之前提到的偏好、任务状态等重要信息随之消失。解法：重置前异步启动轻量 `AIAgent`，让它审阅对话历史，把重要内容写入 `MEMORY.md`/`USER.md`，flush 结果持久化到 `sessions.json`（`memory_flushed=True`），防止 gateway 重启后重复 flush。连续失败 3 次后主动放弃，避免无限重试阻塞重置流程。
+
+**把本地 runtime id 当作 URL session id**：Web/desktop 前端如果把短生命周期 runtime id 写进路由，gateway 重启或 profile swap 后就会 404。Hermes Desktop 的做法是路由使用 stored session id，resume 后再拿 live runtime id；prompt.submit 遇到 `session not found` 时自动 `session.resume` 后重试一次。
 
 ## L2 详情
 

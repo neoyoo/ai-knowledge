@@ -3,10 +3,10 @@ title: "Prompt System — Hermes Agent"
 category: L2
 parent: "[[prompt-system]]"
 source: hermes-agent
-source_version: "0.8.0"
+source_version: "0.16.0"
 confidence: high
 created: 2026-04-08
-updated: 2026-04-08
+updated: 2026-06-10
 ---
 
 ## 概述
@@ -260,6 +260,6 @@ skin 与 prompt 的唯一间接关联是：`ares` skin 定义了 `agent_name: "A
 
 ## 来源
 
-- 源码版本：hermes-agent 0.8.0（`pyproject.toml` / `hermes_cli/__init__.py`）
+- 源码版本：hermes-agent 0.16.0（`pyproject.toml` / `hermes_cli/__init__.py`）
 - 分析深度：源码级
 - 核心文件：`run_agent.py`（主装配逻辑）、`agent/prompt_builder.py`（无状态辅助函数）、`agent/memory_manager.py`（记忆层）、`agent/skill_utils.py`（skill 过滤）、`hermes_cli/skin_engine.py`（展示层）、`hermes_cli/default_soul.py`（默认身份）

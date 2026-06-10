@@ -3,10 +3,10 @@ title: "Tool System — Hermes Agent"
 category: L2
 parent: "[[tool-system]]"
 source: hermes-agent
-source_version: "0.8.0"
+source_version: "0.16.0"
 confidence: high
 created: 2026-04-08
-updated: 2026-04-08
+updated: 2026-06-10
 ---
 
 ## 概述
@@ -273,6 +273,6 @@ cosign 不在 PATH 时自动降级为 SHA-256 only（HTTPS + 校验和仍提供�
 
 ## 来源
 
-- 源码版本：hermes-agent 0.8.0
+- 源码版本：hermes-agent 0.16.0
 - 分析深度：源码级
 - 主要分析文件：`tools/registry.py`、`model_tools.py`、`toolsets.py`、`toolset_distributions.py`、`tools/tool_result_storage.py`、`tools/budget_config.py`、`tools/approval.py`、`tools/mcp_tool.py`、`hermes_cli/plugins.py`、`tools/terminal_tool.py`、`tools/web_tools.py`、`tools/file_tools.py`、`tools/delegate_tool.py`

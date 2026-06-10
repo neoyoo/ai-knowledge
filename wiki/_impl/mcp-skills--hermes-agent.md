@@ -3,10 +3,10 @@ title: "MCP & Skills — Hermes Agent"
 category: L2
 parent: "[[mcp-skills]]"
 source: hermes-agent
-source_version: "0.8.0"
+source_version: "0.16.0"
 confidence: high
 created: 2026-04-08
-updated: 2026-04-08
+updated: 2026-06-10
 ---
 
 ## 概述
@@ -397,6 +397,6 @@ SKILLS_GUIDANCE = (
 
 ## 来源
 
-- 源码版本：Hermes Agent 0.8.0（`pyproject.toml`）
+- 源码版本：Hermes Agent 0.16.0（`pyproject.toml`）
 - 分析深度：源码级
 - 关键文件：`mcp_serve.py`、`tools/mcp_tool.py`、`tools/skills_hub.py`、`tools/skills_tool.py`、`tools/skills_guard.py`、`agent/skill_utils.py`、`agent/prompt_builder.py`

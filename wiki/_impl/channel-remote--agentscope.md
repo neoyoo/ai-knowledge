@@ -3,257 +3,172 @@ title: "channel-remote——agentscope"
 category: L2
 parent: "[[channel-remote]]"
 source: agentscope
-source_version: "0ff492c3508e532d2a33234dfe4a299833ce866c 2026-04-12"
+source_version: "v2.0.1-11-g0e5418e8"
 concept: channel-remote
 created: "2026-04-15"
-updated: "2026-04-15"
+updated: "2026-06-10"
 confidence: high
 ---
 
 ## 概述
 
-AgentScope 通过 `realtime/` 和 `tts/` 两个模块实现多模态实时通道。`realtime/` 提供基于 WebSocket 的双向流式对话抽象，支持 OpenAI、DashScope（阿里云）、Gemini 三家 Realtime API，并定义了一套跨提供商统一的事件体系（ModelEvents / ServerEvents / ClientEvents）；`tts/` 提供独立的语音合成通道，支持流式输出与实时流式输入两种模式。整体采用异步 asyncio + Queue 驱动，前后端通过结构化事件对象解耦。
+AgentScope Python 2.x 的 channel/remote 主线已经不是旧版 `realtime/` + `tts/`。当前源码中未找到旧页引用的 `realtime/`、`tts/` 路径；真实主线是 **FastAPI app factory + session REST/SSE + MessageBus event replay/live fan-out + Redis session lock**。
+
+这让 AgentScope 更接近 Web/distributed agent backend：HTTP endpoint 只负责接入，真正的运行路径由 `ChatService`、`MessageBus`、`StorageBase`、`WorkspaceManagerBase`、`AgentState` 串起来。跨系统 AgentCard/A2A/Nacos 能力应看独立的 [[agent-registry-discovery--agentscope-java]]。
 
 ---
 
-## 架构分析
+## 当前架构
 
-### 三层事件模型
+### FastAPI App Factory
 
-AgentScope 在 Realtime 通道中设计了三层语义明确的事件体系：
+`create_app()` 是可嵌入的服务入口。调用方必须注入：
 
-| 事件层 | 命名空间 | 方向 | 职责 |
-|---|---|---|---|
-| `ModelEvents` | `model_*` | API → Agent | 抹平不同 Realtime API 的原生事件差异，统一为 AgentScope 内部格式 |
-| `ServerEvents` | `agent_*` / `server_*` | Backend → Frontend | 在 `ModelEvents` 基础上增加 `agent_id` / `agent_name`，向 Web 前端或其他 Agent 广播 |
-| `ClientEvents` | `client_*` | Frontend → Backend | 接收用户操作（音频流、文本、图像、工具结果），路由到对应 Agent |
+- `StorageBase`
+- `MessageBus`
+- `WorkspaceManagerBase`
 
-`ServerEvents.from_model_event()` 实现了 ModelEvents → ServerEvents 的机械转换：通过类名替换（`Model` → `Agent`）+ `model_dump()` + `model_validate()` 完成，无需逐类手写。
+还可以注入：
 
-### RealtimeModelBase 抽象层
+- `extra_agent_middlewares`
+- `extra_agent_tools`
+- `custom_subagent_templates`
+- `custom_agent_cls`
 
-`RealtimeModelBase`（`realtime/_base.py`）是所有 Realtime 模型的基类，核心契约：
+这使 AgentScope 的 remote runtime 可以挂载到已有 FastAPI 应用，或作为独立服务运行；Web 层不直接创建 agent，而是把依赖放进 `app.state` 供 router/service 使用。
 
-- `connect(outgoing_queue, instructions, tools)` — 建立 WebSocket 连接，发送 session config，启动内部接收任务
-- `send(data: AudioBlock | TextBlock | ImageBlock | ToolResultBlock)` — 向模型发送多模态输入（各子类实现平台格式转换）
-- `parse_api_message(message)` — 将平台原生 JSON 解析为统一 `ModelEvents.EventBase`
-- `_receive_model_event_loop(outgoing_queue)` — asyncio Task，持续从 WebSocket 读取消息，调用 `parse_api_message`，将结果放入 `outgoing_queue`
+源码依据：
 
-三家实现（OpenAI / DashScope / Gemini）各自重写 `send` 和 `parse_api_message`，差异点见下文。
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/_app.py:32` — `create_app()` 参数
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/_app.py:138` — storage/message_bus/workspace_manager 写入 app state
 
-### RealtimeAgent：事件路由中枢
+### Session REST + SSE
 
-`RealtimeAgent`（`agent/_realtime_agent.py`）连接前后端与模型，管理两个异步循环：
+Session router 提供消息查询和事件订阅。SSE endpoint 的关键路径是：
 
-1. `_forward_loop` — 从 `_incoming_queue` 取事件（ClientEvents 或来自其他 Agent 的 ServerEvents），转为多模态 Block 发送给模型
-2. `_model_response_loop` — 从 `_model_response_queue` 取 ModelEvent，映射为 ServerEvent 放入 `outgoing_queue`；`ToolUseDone` 事件会额外异步执行工具调用并将结果回馈给模型
+1. 校验当前 `user_id` / `agent_id` 是否拥有 session
+2. 读取 `message_bus.session_read_events(session_id)`，先 replay 当前 run 的 buffered events
+3. 启动 feeder task 订阅 `message_bus.session_subscribe_events(session_id)`
+4. 主循环从 queue 取 live events
+5. 每 30 秒输出一次 SSE heartbeat comment frame
 
-### TTS 通道：独立的语音合成层
+这个 replay-then-live 模式适合浏览器刷新、移动网络断线或前端晚订阅的场景：只要 replay log 还在，客户端不会错过当前 run 已经产生的事件。
 
-`TTSModelBase`（`tts/_tts_base.py`）抽象两种模式：
+源码依据：
 
-- **非流式** (`supports_streaming_input=False`)：`synthesize(msg)` 一次完成，等待完整音频返回
-- **流式输入** (`supports_streaming_input=True`)：通过 async context manager 管理生命周期，`push(msg)` 接受增量文本并非阻塞返回当前已合成的音频，`synthesize()` 等待完成并返回剩余部分
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/_router/_session.py:421` — `/{session_id}/stream` SSE endpoint
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/_router/_session.py:472` — replay buffered events
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/_router/_session.py:476` — live subscribe feeder task
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/_router/_session.py:500` — 30 秒 heartbeat
 
-`DashScopeCosyVoiceRealtimeTTSModel` 是唯一实现流式输入的 TTS 模型，通过 DashScope SDK 的 `SpeechSynthesizer.streaming_call()` 驱动，内部使用 `threading.Event` 做线程边界（SDK 回调在独立线程）。
+### ChatService 统一 run lifecycle
 
----
+`ChatService` 是 HTTP chat endpoint 和 wakeup dispatcher 的共同执行路径。它在 `MessageBus.session_run(session_id)` 内运行 agent，保证同一 session 只有一个 run 在执行；run 中产生的每个 event 都通过 `session_publish_event()` 写入 replay log 并推送 live subscribers。
 
-## 关键代码路径
+这个设计把 channel 层压薄：REST/SSE 不需要知道 agent loop 细节，只需要读写 session、提交输入、订阅事件。
 
-### WebSocket 连接建立与事件循环
+源码依据：
 
-```
-RealtimeModelBase.connect(outgoing_queue, instructions, tools)
-  ├── websockets.connect(self.websocket_url, additional_headers)  → self._websocket
-  ├── asyncio.create_task(_receive_model_event_loop(outgoing_queue))
-  └── self._websocket.send(json.dumps(_build_session_config(instructions, tools)))
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/_service/_chat.py:51` — MessageBus 提供 distributed lock、event replay、live fan-out
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/_service/_chat.py:354` — `async with self._message_bus.session_run(session_id)`
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/_service/_chat.py:372` — reply events 发布到 session event stream
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/_service/_chat.py:416` — 更新后的 session state 在 lock 内持久化
 
-_receive_model_event_loop(outgoing_queue):
-  async for message in self._websocket:
-    events = await self.parse_api_message(message)
-    for event in events:
-      await outgoing_queue.put(event)
-```
+### Redis MessageBus 分布式锁
 
-文件：`realtime/_base.py:68-157`
+Redis MessageBus 的锁实现使用：
 
-### DashScope session config 构建
+- `SET key token NX EX ttl_secs` 原子抢锁
+- heartbeat task 按 `ttl_secs / 2` 续租
+- 释放时先 `GET` 校验 token，再 `DEL`
 
-```python
-DashScopeRealtimeModel._build_session_config(instructions, tools) -> dict
-  # 固定 turn_detection.type = "server_vad"
-  # input_audio_format = "pcm16" / "pcm24" 根据 input_sample_rate
-  # output_audio_format 同理
-  # enable_input_audio_transcription 时注入 input_audio_transcription.model = "gummy-realtime-v1"
-  return {"type": "session.update", "session": session_config}
-```
+这对 Web/distributed agent 很关键：没有 session lock，同一个 session 可能被 HTTP 请求、wakeup、外部执行结果同时触发，导致 agent state 和 reply message 被并发写坏。
 
-文件：`realtime/_dashscope_realtime_model.py:96-131`
+源码依据：
 
-### OpenAI 工具调用参数累积
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/message_bus/_redis_message_bus.py:449` — `acquire_lock()`
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/message_bus/_redis_message_bus.py:479` — `SET NX EX`
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/message_bus/_redis_message_bus.py:485` — heartbeat
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/message_bus/_redis_message_bus.py:503` — token guarded release
 
-OpenAI Realtime API 以流式 delta 下发 function call arguments，需在客户端手动累积：
+### Workspace/Permission 与 channel 绑定
 
-```python
-# parse_api_message 内部
-case "response.function_call_arguments.delta":
-    self._tool_args_accumulator[call_id] += arguments_delta
-    # 返回累积值而不是仅返回 delta
-    model_event = ModelResponseToolUseDeltaEvent(
-        tool_use=ToolUseBlock(..., raw_input=self._tool_args_accumulator[call_id])
-    )
+每轮 run 会根据 session 的 `workspace_id` 解析 workspace，并把 workspace workdir 写入 permission context。这样从 HTTP channel 进入的用户消息不会绕开 workspace 权限边界；工具能力由 session workspace 和 toolkit assembly 决定。
 
-case "response.function_call_arguments.done":
-    model_event = ModelResponseToolUseDoneEvent(
-        tool_use=ToolUseBlock(
-            input=_json_loads_with_repair(current_input),
-            raw_input=current_input,
-        )
-    )
-    del self._tool_args_accumulator[call_id]
-```
+源码依据：
 
-文件：`realtime/_openai_realtime_model.py:310-352`
-
-### Gemini 事件解析（无原生 response.created）
-
-Gemini Live API 不发送 `response.created` 事件，AgentScope 在收到第一个 audio/text chunk 时自行生成 response_id：
-
-```python
-def _ensure_response_id(self) -> str:
-    if not self._response_id:
-        self._response_id = f"resp_{shortuuid.uuid()}"
-    return self._response_id
-
-# parse_api_message 路由
-if "setupComplete" in data:
-    → ModelSessionCreatedEvent(session_id="gemini_session")
-elif "serverContent" in data:
-    → _parse_server_content(data["serverContent"])
-        ├── "modelTurn"          → _parse_model_turn → audio/transcript delta
-        ├── "generationComplete" → ModelResponseDoneEvent (清空 _response_id)
-        ├── "turnComplete"       → 若有 _response_id 则发 ModelResponseDoneEvent
-        └── "interrupted"        → 忽略（log debug）
-elif "toolCall" in data:
-    → 批量 ModelResponseToolUseDoneEvent（Gemini 不分 delta/done，直接全量）
-```
-
-文件：`realtime/_gemini_realtime_model.py:251-516`
-
-### ModelEvents → ServerEvents 自动映射
-
-```python
-ServerEvents.from_model_event(model_event, agent_id, agent_name):
-    cls_name = model_event.__class__.__name__.replace("Model", "Agent")
-    # e.g. "ModelResponseAudioDeltaEvent" → "AgentResponseAudioDeltaEvent"
-    agent_event_cls = getattr(ServerEvents, cls_name)
-    model_event_dict = model_event.model_dump()
-    model_event_dict["type"] = model_event_dict["type"].replace("model_", "agent_")
-    model_event_dict["agent_id"] = agent_id
-    model_event_dict["agent_name"] = agent_name
-    return agent_event_cls.model_validate(model_event_dict)
-```
-
-文件：`realtime/_events/_server_event.py:463-524`
-
-### RealtimeAgent 工具调用链路
-
-```
-_model_response_loop 接收 ModelResponseToolUseDoneEvent
-  ├── 立即 put AgentResponseToolUseDoneEvent 到 outgoing_queue（通知前端）
-  └── asyncio.create_task(_acting(tool_use, outgoing_queue))
-        ├── toolkit.call_tool_function(tool_use) → 异步执行
-        ├── model.send(ToolResultBlock)           → 发回给 Realtime API
-        └── put AgentResponseToolResultEvent 到 outgoing_queue（通知前端结果）
-```
-
-文件：`agent/_realtime_agent.py:275-360`
-
-### DashScope CosyVoice 实时 TTS 流式输入路径
-
-```
-DashScopeCosyVoiceRealtimeTTSModel.push(msg) → TTSResponse(非阻塞):
-  synthesizer.streaming_call(delta_to_send)
-  res = await _dashscope_callback.get_audio_data(block=False)
-  return res  # 可能为空，音频还没合成完
-
-DashScopeCosyVoiceRealtimeTTSModel.synthesize(msg=None) → TTSResponse(阻塞):
-  synthesizer.streaming_complete()  # 通知 SDK 输入结束
-  if self.stream:
-    return _dashscope_callback.get_audio_chunk()  # AsyncGenerator
-  else:
-    return await _dashscope_callback.get_audio_data(block=True)
-```
-
-文件：`tts/_dashscope_cosyvoice_realtime_tts_model.py:144-279`
-
-### PCM/Base64 对齐算法（CosyVoice 回调）
-
-```python
-# on_data(data: bytes) 内：
-# 以 6 字节为单位编码，保证 PCM（2字节/样本）和 base64（3字节/组）双对齐
-aligned_len = (len(self._audio_bytes) // 6) * 6
-if aligned_len > self._last_encoded_pos:
-    new_chunk = self._audio_bytes[self._last_encoded_pos : aligned_len]
-    self._audio_base64 += base64.b64encode(new_chunk).decode()
-    self._last_encoded_pos = aligned_len
-```
-
-文件：`tts/_utils.py:63-77`
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/_service/_chat.py:172` — 解析 session workspace
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/_service/_chat.py:222` — workspace workdir 注入 permission context
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/_service/_toolkit.py:93` — workspace tools 进入 toolkit
+- `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/_service/_toolkit.py:194` — workspace skills/MCPs 进入 toolkit
 
 ---
 
 ## 设计亮点
 
-**统一事件体系 + 自动映射**：三层事件（ModelEvents / ServerEvents / ClientEvents）通过命名约定（`model_` ↔ `agent_`）实现机械转换，新增事件类型只需在模型层定义，无需手动维护映射表。Pydantic v2 的 `model_dump()` + `model_validate()` 做序列化中转，类型安全且零手写胶水代码。
+### 1. Replay-first SSE
 
-**多提供商统一 API 但差异隔离**：三家 Realtime API 的协议差异（Gemini 无 `response.created`、OpenAI 需累积 tool args delta、DashScope 不支持 tools）全部封装在各自的 `parse_api_message` 和 `_build_session_config` 内，`RealtimeAgent` 完全不感知提供商差异。
+SSE 不只是 live pub/sub。连接建立后先 replay 当前 run 的 buffered events，再进入 live subscribe。这比纯 live SSE 更适合 agent run，因为前端经常晚于 run 启动才接上事件流。
 
-**工具调用的异步并行执行**：`_acting` 以 `asyncio.create_task` 异步派发，不阻塞模型响应处理循环；工具结果既发回给 Realtime API（继续对话），也广播给 outgoing_queue（让前端显示结果），双路通知。
+### 2. Channel 层不承载 agent 业务逻辑
 
-**PCM + base64 双对齐**：CosyVoice 回调中以 LCM(2,3)=6 字节为边界编码，保证实时流式切片时既不破坏 PCM 样本边界，也不产生 base64 padding 碎片，可直接用于流式播放。
+Router 做鉴权、参数解析和 streaming response；真正 run lifecycle 在 `ChatService`。这让 HTTP、wakeup、外部执行结果恢复能共享同一条状态更新路径。
 
-**VAD 服务端检测**：DashScope 和 OpenAI 均默认启用 `server_vad`（语音活动检测在 API 服务端），AgentScope 层不做本地 VAD，降低客户端复杂度，由云端决定说话结束时机。
+### 3. Session lock 在 MessageBus 层
 
-**Cold Start 门槛控制**：`DashScopeCosyVoiceRealtimeTTSModel` 的 `cold_start_length` 和 `cold_start_words` 参数允许设置首批 TTS 请求的最低文本量，避免因输入太短造成合成停顿，对流式 LLM 输出接驳 TTS 场景实用。
+把 lock 放进 MessageBus，而不是散落在 router 或 storage adapter 中，可以让 run lifecycle 统一使用同一个互斥语义。不同部署只需要替换 MessageBus 后端。
+
+### 4. App Factory 支持产品壳扩展
+
+`extra_agent_middlewares`、`extra_agent_tools`、`custom_subagent_templates`、`custom_agent_cls` 给产品层留了扩展点，但不污染 AgentScope core。agent-os 可以借鉴这个做法，把 local proxy agent 和 Web distributed agent 做成不同 shell。
+
+### 5. Wakeup / inbox 支持异步协作
+
+team message、background task completion、external execution result 都可以转成 inbox/wakeup，而不是要求同步调用同一个 agent 实例。这是从本地 agent 升级到 Web 分布式 agent 的关键抽象。
 
 ---
 
 ## 局限性
 
-**DashScope Realtime 不支持 Tools**：`DashScopeRealtimeModel.support_tools = False`，工具调用功能仅 OpenAI 和 Gemini 可用。DashScope 的 `text` 输入模式在源码中也有 `TODO: 尚未可用` 注释，功能不完整。
+### 1. SSE 是单向通道
 
-**CosyVoice 单请求限制**：`DashScopeCosyVoiceRealtimeTTSModel` 每次只能处理一个流式输入序列，不支持并发多路 TTS 合成。注释明确："不能处理 `[msg_1_chunk0, msg_2_chunk0]` 这类交叉消息"。
+SSE 适合事件下行，但用户输入、确认、外部执行结果仍要走 REST。若 agent-os 需要双向实时控制、语音/低延迟交互或复杂前端协作，后续仍可能需要 WebSocket/WebRTC。
 
-**OpenAI 并行工具调用不完整**：`parse_api_message` 中 `TODO` 注释指出，工具调用累积器 `_tool_args_accumulator` 设计对并行工具调用（parallel function calls）处理有缺陷，当前一次只能可靠处理一个工具调用。
+### 2. Replay log 生命周期需要产品层明确
 
-**Session 生命周期管理薄弱**：`disconnect()` 中有 `TODO: session ended` 注释，WebSocket 断开后没有会话状态持久化或恢复机制，重连需要从头建立 session。
+当前 L2 只确认 SSE 会先 replay buffered events；具体 replay log 的保留策略、trim 时机、失败恢复窗口需要部署时明确，否则前端断线过久仍可能丢事件。
 
-**PCM 重采样依赖第三方**：`_forward_loop` 中 Agent 间音频路由需要 PCM 重采样（`_resample_pcm_delta`），实现在 `_utils/_common.py`，但没有声明依赖的重采样库，生产部署可能存在隐性依赖。
+### 3. Local workspace 不等于多租户沙箱
 
-**Gemini 无 token 计数**：Gemini 的 `ModelResponseDoneEvent` 中 `input_tokens=0, output_tokens=0` 为硬编码，Gemini Live API 当前版本不返回 token 用量，成本追踪不可用。
+AgentScope 提供 Local/Docker/E2B workspace 抽象，但 Local workspace 对 Web 多用户并不是安全沙箱。对外暴露 channel 时，应优先使用 Docker/E2B 或外层租户隔离。
 
-**TTS 模块与 Realtime Agent 未集成**：`tts/` 和 `realtime/` 是独立模块，`RealtimeAgent` 没有内置 TTS 支持。若需要 LLM 文字回复 → TTS 语音输出，需要用户自己编写桥接逻辑。
+### 4. Python 2.x 不再是旧 Realtime/TTS 参考
+
+旧 `realtime/`、`tts/` 目录不在当前 Python 2.x 源码中。多模态实时 API、TTS、旧 ChatRoom 相关内容不应继续作为本页 source-backed 结论。
+
+---
+
+## 对 agent-os 的借鉴
+
+P0：为 Web distributed agent 定义 `RunController`，把 run lock、event publish、state persistence 放在同一条事务边界内。不要让 HTTP handler 直接调用 agent loop。
+
+P0：`MessageBus` 应同时支持 event stream 和 session wakeup。local 形态可以用 in-process queue；Web 形态可用 Redis/NATS；接口保持一致。
+
+P1：channel event stream 采用 replay-first。前端刷新后先补当前 run 已发事件，再接 live stream，避免“run 已开始但 UI 订阅晚了”的空洞。
+
+P1：REST/SSE 可作为第一版 Web channel。等到需要双向低延迟控制时，再升级 WebSocket；不要一开始把 channel 和 agent loop 绑死在 WebSocket 生命周期上。
+
+P1：Workspace/Permission 必须绑定 session。所有从 channel 进入的工具调用都应由 session workspace 统一决定权限，而不是由 adapter 自己决定。
 
 ---
 
 ## 来源
 
-- 源码版本：`0ff492c3508e532d2a33234dfe4a299833ce866c 2026-04-12`
+- 源码版本：`v2.0.1-11-g0e5418e8`
 - 分析深度：源码级
-- 覆盖文件：
-  - `realtime/_base.py`
-  - `realtime/_dashscope_realtime_model.py`
-  - `realtime/_openai_realtime_model.py`
-  - `realtime/_gemini_realtime_model.py`
-  - `realtime/_events/_model_event.py`
-  - `realtime/_events/_server_event.py`
-  - `realtime/_events/_client_event.py`
-  - `realtime/_events/_utils.py`
-  - `agent/_realtime_agent.py`
-  - `tts/_tts_base.py`
-  - `tts/_tts_response.py`
-  - `tts/_dashscope_cosyvoice_realtime_tts_model.py`
-  - `tts/_openai_tts_model.py`
-  - `tts/_utils.py`
+- 核心文件：
+  - `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/_app.py`
+  - `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/_router/_session.py`
+  - `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/_service/_chat.py`
+  - `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/_service/_toolkit.py`
+  - `/Users/neo/Desktop/project/git/agentscope/src/agentscope/app/message_bus/_redis_message_bus.py`

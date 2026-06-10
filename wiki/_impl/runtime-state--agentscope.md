@@ -3,260 +3,160 @@ title: "runtime-state——agentscope"
 category: L2
 parent: "[[runtime-state]]"
 source: "agentscope"
-source_version: "0ff492c3508e532d2a33234dfe4a299833ce866c 2026-04-12"
+source_version: "v2.0.1-11-g0e5418e8"
 concept: "runtime-state"
 created: "2026-04-15"
-updated: "2026-04-15"
+updated: "2026-06-10"
 confidence: high
 ---
 
 ## 概述
 
-agentscope 将运行时状态拆分为三个独立层：**进程级配置**（`_ConfigCls` + `ContextVar`）、**模块级状态树**（`StateModule` 递归序列化）、**会话持久化**（`SessionBase` 多后端适配）。三层正交设计使单进程内可运行多个隔离的 agent 实例，任意时刻都可将状态快照持久化，重启后无缝恢复。
+AgentScope Python 2.x 的 runtime state 以 `AgentState` 为中心，并由 App runtime 的 `SessionRecord`、`StorageBase`、`MessageBus`、`WorkspaceManager` 共同定义生命周期。它不再使用旧版 `_ConfigCls + StateModule + SessionBase` 三层状态树；当前源码中未找到 `src/agentscope/module/_state_module.py` 或 `src/agentscope/session/`。
+
+更准确地说，AgentScope 2.x 把 agent 状态分成两类：
+
+- **可持久化 session state**：`AgentState`，随 `SessionRecord` 存储和恢复
+- **可重建 runtime dependencies**：model、toolkit、middlewares、workspace、message bus，每轮由 `ChatService` 从配置和 managers 重建
 
 ---
 
 ## 架构分析
 
-### 层一：进程级运行配置（`_ConfigCls`）
+### AgentState
 
-`src/agentscope/__init__.py` 在模块加载时创建唯一的全局单例 `_config`：
-
-```python
-_config = _ConfigCls(
-    run_id=ContextVar("run_id", default=shortuuid.uuid()),
-    project=ContextVar("project", default="UnnamedProject_At..."),
-    name=ContextVar("name", default=...),
-    created_at=ContextVar("created_at", default=...),
-    trace_enabled=ContextVar("trace_enabled", default=False),
-)
-```
-
-`_ConfigCls`（`src/agentscope/_run_config.py`）将每个字段包在 `ContextVar` 里，通过 property 读写。`ContextVar` 的语义保证了同一进程内不同 asyncio Task 可以各自持有独立的配置快照——这是 agentscope 支持多并发 agent 会话的底层机制。
-
-`init()` 函数是唯一的公开修改入口，负责写入 project/name/run_id、初始化日志、向 Studio 注册运行实例、以及挂载 OpenTelemetry 追踪。
-
-### 层二：模块级状态树（`StateModule`）
-
-`src/agentscope/module/_state_module.py` 定义了可递归的状态容器基类：
-
-```python
-class StateModule:
-    def __init__(self) -> None:
-        self._module_dict = OrderedDict()    # 子 StateModule 注册表
-        self._attribute_dict = OrderedDict() # 标量属性注册表
-
-    def __setattr__(self, key: str, value: Any) -> None:
-        if isinstance(value, StateModule):
-            self._module_dict[key] = value   # 自动感知子模块
-        super().__setattr__(key, value)
-
-    def register_state(self, attr_name: str,
-                       custom_to_json=None, custom_from_json=None) -> None:
-        # 将标量属性纳入序列化范围
-        self._attribute_dict[attr_name] = _JSONSerializeFunction(...)
-
-    def state_dict(self) -> dict:
-        # 递归序列化所有子模块 + 注册属性
-        ...
-
-    def load_state_dict(self, state_dict: dict, strict: bool = True) -> None:
-        # 递归反序列化，strict=True 时键缺失抛异常
-        ...
-```
-
-**继承链**如下：
+`AgentState` 是一棵 Pydantic state：
 
 ```
-StateModule
-├── AgentBase          (src/agentscope/agent/_agent_base.py)
-│   └── ReActAgent     (register_state("name"), register_state("_sys_prompt"))
-├── MemoryBase         (src/agentscope/memory/_working_memory/_base.py)
-│   └── InMemoryMemory (register_state("content"))  — 覆盖 state_dict/load_state_dict
-└── LongTermMemoryBase (src/agentscope/memory/_long_term_memory/_long_term_memory_base.py)
+AgentState
+├── session_id
+├── summary
+├── context: list[Msg]
+├── reply_id
+├── cur_iter
+├── permission_context: PermissionContext
+├── tool_context: ToolContext
+│   ├── read_file_cache
+│   └── activated_groups
+└── tasks_context: TaskContext
 ```
 
-`AgentBase` 本身继承 `StateModule`，其成员 `memory`（`MemoryBase` 子类）在赋值时自动被 `__setattr__` 钩住写入 `_module_dict`，因此 `agent.state_dict()` 会递归包含内存内容，无需手动处理嵌套。
+它覆盖了主循环、context、工具、权限、task 这几个需要跨 run 保留的状态。
 
-### 层三：会话持久化（`SessionBase`）
+### SessionRecord
 
-`src/agentscope/session/_session_base.py` 定义抽象接口：
+`SessionRecord` 把 state 和不可变/低频变更配置放在一起：
 
-```python
-class SessionBase:
-    async def save_session_state(
-        self, session_id: str, user_id: str = "",
-        **state_modules_mapping: StateModule
-    ) -> None: ...
+- `config.workspace_id`
+- `config.chat_model_config`
+- `config.fallback_chat_model_config`
+- `source` / `source_schedule_id`
+- `team_id`
+- `state`
 
-    async def load_session_state(
-        self, session_id: str, user_id: str = "",
-        allow_not_exist: bool = True,
-        **state_modules_mapping: StateModule
-    ) -> None: ...
-```
+这让 session 不只是聊天历史 id，而是“这个 agent 在哪个 workspace、用哪个模型、属于哪个 team、当前状态是什么”的运行单元。
 
-三个具体实现：
+### Runtime dependencies 每轮重建
 
-| 后端 | 文件 | 存储方式 | 特殊能力 |
-|------|------|---------|---------|
-| `JSONSession` | `_json_session.py` | 本地文件 `{user_id}_{session_id}.json` | `aiofiles` 异步 IO |
-| `RedisSession` | `_redis_session.py` | Redis Hash key（带 prefix + TTL） | `GETEX` 原子刷新 TTL（sliding TTL） |
-| `TablestoreSession` | `_tablestore_session.py` | Alibaba Tablestore metadata 字段 `__state__` | 懒加载初始化（asyncio.Lock 双检） |
+`ChatService._run_impl()` 会每轮重建：
 
-所有后端统一调用模式：
+- workspace：`workspace_manager.get_workspace(...)`
+- toolkit：workspace tools + planning + background + schedule + team + extras + skills + MCPs
+- middlewares：inbox、state change、tool offload、extra middlewares
+- model / fallback model
+- agent：`Agent(..., state=session_record.state, ...)`
 
-```python
-state_dicts = {
-    name: state_module.state_dict()
-    for name, state_module in state_modules_mapping.items()
-}
-# 序列化为 JSON 字符串后写入对应后端
-```
+这意味着 runtime state 不试图序列化工具对象、模型 client、连接池、middleware 实例，而是保存足够的 ID/config 后重建。
 
-### Msg 消息对象
+### ToolContext
 
-`src/agentscope/message/_message_base.py` 定义了 `Msg`，作为 agent 间通信和状态中最核心的数据单位：
+`ToolContext` 是 `AgentState` 中最容易被忽略的部分：
 
-- 字段：`id`（shortuuid）、`name`、`role`（user/assistant/system）、`content`（`str | list[ContentBlock]`）、`metadata`、`timestamp`、`invocation_id`
-- `content` 支持多模态块类型（`TextBlock`、`ToolUseBlock`、`ToolResultBlock`、`ImageBlock`、`AudioBlock`、`VideoBlock`）通过 TypedDict 定义
-- 提供 `to_dict()` / `from_dict()` 双向序列化，供 `InMemoryMemory.state_dict()` 直接调用
+- `activated_groups`：当前模型可见的非 basic 工具组
+- `read_file_cache`：Read/Edit 等文件工具的缓存，带 `updated_at` 校验和 LRU/size 控制
+
+context 压缩后，Agent 会清理不再被保留 context 引用的 read cache，避免状态长期膨胀。
 
 ---
 
 ## 关键代码路径
 
-### 路径 1：状态自动感知注册
-
-```
-AgentBase.__init__()
-  → super().__init__()                         # StateModule.__init__
-  → self.memory = InMemoryMemory()
-      └→ StateModule.__setattr__("memory", ...)  # 自动写入 _module_dict
-  → self.register_state("name")               # 写入 _attribute_dict
-```
-
-### 路径 2：保存会话快照
-
-```python
-await session.save_session_state(
-    session_id="user_1",
-    agent1=agent1,   # 命名参数即 **state_modules_mapping
-    agent2=agent2,
-)
-```
-
-内部展开：
-
-```
-JSONSession.save_session_state(session_id, user_id, **mapping)
-  → {name: module.state_dict() for name, module in mapping.items()}
-      └→ AgentBase.state_dict()              # StateModule.state_dict()
-          ├→ memory.state_dict()              # 子模块递归
-          │   └→ InMemoryMemory.state_dict()
-          │       → [[msg.to_dict(), marks], ...]
-          └→ "name", "_sys_prompt"           # 注册的标量属性
-  → json.dumps(state_dicts)
-  → aiofiles.open(path, "w").write(json_str)
-```
-
-### 路径 3：恢复会话状态
-
-```
-JSONSession.load_session_state(session_id, user_id, **mapping)
-  → aiofiles.open(path, "r").read() → json.loads()
-  → for name, module in mapping.items():
-      module.load_state_dict(states[name])
-          └→ StateModule.load_state_dict()
-              ├→ _module_dict[key].load_state_dict(sub_state)  # 递归子模块
-              └→ setattr(self, key, from_json(value))          # 恢复标量
-```
-
-### 路径 4：Redis 滑动 TTL 刷新
-
-```
-RedisSession.load_session_state(...)
-  → key = "{prefix}user_id:{uid}:session:{sid}:state"
-  → if key_ttl is not None:
-      data = await client.getex(key, ex=key_ttl)   # 原子 GET + 续期
-    else:
-      data = await client.get(key)
-```
-
-### 路径 5：进程级配置注入
-
-```
-agentscope.init(project="MyProject", run_id="abc")
-  → _config.project = "MyProject"     # ContextVar.set()
-  → _config.run_id = "abc"
-  → if tracing_url: setup_tracing(endpoint)
-                    _config.trace_enabled = True
-```
+- `src/agentscope/state/_state.py` — `AgentState` / `ToolContext` / `TaskContext`
+- `src/agentscope/app/storage/_model/_session.py` — `SessionRecord`
+- `src/agentscope/app/storage/_model/_agent.py` — `AgentData`
+- `src/agentscope/app/_service/_chat.py` — runtime dependency assembly
+- `src/agentscope/app/_service/_toolkit.py` — toolkit assembly
+- `src/agentscope/app/message_bus/_base.py` — run lock、events、inbox、wakeup
+- `src/agentscope/agent/_agent.py` — state mutation and loop control
 
 ---
 
 ## 设计亮点
 
-### 1. `ContextVar` 驱动的并发安全全局配置
+### 1. State 只保存可恢复事实，不保存活对象
 
-`_ConfigCls` 所有字段均包裹在 `ContextVar` 中，而非普通 class 属性。这意味着不同 asyncio Task（每个用户会话一个 Task）可以在不加锁的情况下各自维护独立的 `run_id`/`trace_enabled` 状态，天然支持多租户场景，无需线程锁或显式隔离。
+模型 client、MCP session、workspace 实例、middleware 都不进入 state。恢复时通过 `SessionConfig` 和 managers 重建，避免序列化活连接和文件句柄。
 
-### 2. `__setattr__` 钩子实现零侵入的子模块自动发现
+### 2. `AgentState` 同时覆盖 local 和 Web runtime
 
-`StateModule.__setattr__` 在每次赋值时检测 value 是否为 `StateModule` 子类，若是则自动写入 `_module_dict`。开发者为 agent 添加 memory 字段时无需任何额外注册调用，继承树的序列化深度自动向下传递。
+本地代理可以直接持有 `AgentState`；Web runtime 可以把它放进 `SessionRecord` 后端。这个边界比“只保存 messages”更完整，又比“序列化整个 agent 对象”更稳。
 
-### 3. 双维度序列化声明
+### 3. Tool active groups 是状态，不是 toolkit 属性
 
-通过 `register_state(attr_name)` 注册标量，通过 `__setattr__` 自动注册子模块，两条路径最终汇聚在 `state_dict()`。对于无法 JSON 直接序列化的对象（如 `Msg` 列表），允许传入 `custom_to_json` / `custom_from_json` 回调，做到通用性与扩展性兼顾。
+工具组激活状态跟 session 走，而不是跟 `Toolkit` 走。每轮重建 toolkit 后仍可根据 `state.tool_context.activated_groups` 计算模型可见工具。
 
-### 4. 多后端统一接口 + 后端差异能力暴露
+### 4. PermissionContext 与 workspace 联动
 
-三后端共享 `SessionBase` 接口，调用方代码零感知后端差异。同时，Redis 后端额外暴露 `key_ttl`（sliding TTL 通过 GETEX 原子实现）和 `key_prefix`（多环境隔离），Tablestore 后端则通过 `_ensure_initialized()` 的双检锁（asyncio.Lock）延迟初始化，避免冷启动阻塞。
+`ChatService` 每轮把 workspace workdir 注入 `state.permission_context.working_directories`。权限状态不是工具局部变量，而是 session runtime state 的一部分。
 
-### 5. `allow_not_exist` 宽松加载语义
+### 5. Inbox/wakeup 将 idle session 纳入 runtime
 
-`load_session_state` 默认 `allow_not_exist=True`，不存在的 session 仅打日志不报错，使得"首次启动 / 状态恢复"路径统一，上层无需特殊处理冷启动场景。
+`MessageBus` 把 inbox、wakeup 和 session lock 统一起来，使“当前没有进程持有 agent 对象”的 session 也可以接收 team/background/schedule 事件。
 
 ---
 
 ## 局限性
 
-### 1. 全量快照，无增量
+### 1. AgentState 仍是较粗粒度整体写入
 
-每次 `save_session_state` 将所有注册模块的完整状态序列化一次写入，无 diff/patch 机制。对于长期对话（内存大量消息）或高频保存场景，JSON 序列化开销和存储体积会线性增长。
+每轮结束后 `update_session_state()` 写整个 `AgentState`。长 context 或复杂 task state 会带来线性序列化/网络开销。
 
-### 2. 进程级配置与多 Agent 隔离不彻底
+### 2. Runtime dependency 重建依赖外部配置一致
 
-`_config` 是模块级单例，虽然字段用了 `ContextVar`，但 `ContextVar` 的隔离边界是 asyncio Task，而非 agent 实例。同一 Task 内的多个 agent 会共享相同的 `run_id`/`project`，无法做到 agent 粒度的配置隔离。
+恢复能否成功不仅看 `AgentState`，还取决于 agent record、session config、workspace manager、credentials、MCP server 是否仍可用。
 
-### 3. `strict=True` 的脆弱性
+### 3. Local workspace 的 tenant 隔离不足
 
-`load_state_dict(strict=True)` 默认要求 state_dict 中存在模块注册的所有键。这在 agent 版本迭代（新增 `register_state` 字段）时会导致加载旧版本快照失败，缺乏前向兼容的 migration 机制。
+Local workspace manager 当前丢弃 `user_id/session_id`，workdir 为 `basedir/agent_id`。同一 agent 的不同 session/workspace 共享目录，对 Web 多租户形态要额外防护。
 
-### 4. 无生命周期事件
+### 4. 没有独立 state migration 层
 
-`StateModule` 和 `SessionBase` 均无 `on_save` / `on_load` / `on_init` 钩子，无法在状态变更时触发副作用（如通知、指标埋点），可观测性需额外在上层封装。
+`AgentState` 字段变化依赖 Pydantic 默认值和 storage 后端兼容，没有专门 schema version/migration pipeline。
 
-### 5. Tablestore 后端依赖外部托管服务
+---
 
-`TablestoreSession` 依赖阿里云 Tablestore 及 `tablestore-for-agent-memory` 专用 SDK，不可移植到其他关系型或文档型数据库，增加了部署耦合度。
+## 对 agent-os 的借鉴
+
+agent-os 可以采用同样的“state vs dependencies”边界：
+
+- `AgentState`：只放 context summary、active context、tool context、permission context、tasks
+- `SessionConfig`：workspace id、model config、policy profile、agent template id
+- `AgentAssembler`：从 config + state + managers 重建 agent
+- `RuntimeManagers`：workspace、tool providers、message bus、credential resolver
+
+本地代理实现可以把 managers 简化为本地对象；Web 分布式实现应保证 managers 可跨进程重建同一 session。
 
 ---
 
 ## 来源
 
-- `src/agentscope/_run_config.py` — 进程级配置类
-- `src/agentscope/__init__.py` — `_config` 全局实例 + `init()` 函数
-- `src/agentscope/module/_state_module.py` — `StateModule` 核心序列化逻辑
-- `src/agentscope/session/_session_base.py` — 会话持久化抽象接口
-- `src/agentscope/session/_json_session.py` — JSON 文件后端
-- `src/agentscope/session/_redis_session.py` — Redis 后端（sliding TTL）
-- `src/agentscope/session/_tablestore_session.py` — Tablestore 后端（懒加载）
-- `src/agentscope/message/_message_base.py` — `Msg` 消息对象
-- `src/agentscope/message/_message_block.py` — 多模态内容块类型
-- `src/agentscope/memory/_working_memory/_base.py` — `MemoryBase`
-- `src/agentscope/memory/_working_memory/_in_memory_memory.py` — `InMemoryMemory`
-- `src/agentscope/agent/_agent_base.py` — `AgentBase`（继承 StateModule）
-- `tests/session_test.py` — 端到端用法示例
-- 源码版本：0ff492c3508e532d2a33234dfe4a299833ce866c 2026-04-12
-- 分析深度：源码级
+- 项目：`/Users/neo/Desktop/project/git/agentscope`
+- 版本：`v2.0.1-11-g0e5418e8`
+- 核心文件：
+  - `src/agentscope/state/_state.py`
+  - `src/agentscope/app/storage/_model/_session.py`
+  - `src/agentscope/app/storage/_model/_agent.py`
+  - `src/agentscope/app/_service/_chat.py`
+  - `src/agentscope/app/_service/_toolkit.py`
+  - `src/agentscope/app/message_bus/_base.py`
+  - `src/agentscope/agent/_agent.py`
